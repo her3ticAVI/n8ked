@@ -1,4 +1,8 @@
-# n8ked
+<div style="display: flex; justify-content: center;">
+  <img src="img/n8ked-logo.png" alt="bEERRRRR" width="500" height="500">
+</div>
+
+# n8ked - n8n auditor
 
 Unauthenticated exposure and misconfiguration auditor for [n8n](https://n8n.io) instances found during external/internal recon.
 
