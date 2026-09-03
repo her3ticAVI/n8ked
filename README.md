@@ -146,6 +146,9 @@ For write-ups, use something like the following in the methodology/tools section
 
 Adjust the language if `--test-cred` or `--nuclei` weren't used on a given engagement, since both are optional and each carries its own disclosure implications (a credential test, however limited, is still an authentication attempt against the client's system).
 
+### Defensability of n8ked
+N8ked was created to audit n8n instances. This tool relies on data returned from multiple endpoints that self report information. Secrets that were matched by regex were also reported on. None of the information reported by the tool is presumed, and is only flagged if supporting information is returned by the n8n instance.
+
 ## Scope and safety notes
 
 - Every check is a `GET` request except the optional `--test-cred`, which sends exactly one `POST /rest/login` with the credentials you supply — there is no wordlist or spray loop built in.
