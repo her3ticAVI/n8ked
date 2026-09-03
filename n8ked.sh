@@ -30,8 +30,8 @@
 #   -h, --help               Show this help
 #
 # Examples:
-#   ./n8ked.sh http://example.com
-#   ./n8ked.sh example.com --test-cred admin@email.com
+#   ./n8ked.sh http://10.0.0.5:5678
+#   ./n8ked.sh 10.0.0.5:5678 --test-cred admin@example.com:changeme
 #   ./n8ked.sh --file scope-hosts.txt --json > results.jsonl
 #   ./n8ked.sh --eyewitness ~/engagements/acme/EyeWitness-Results
 #
@@ -461,7 +461,7 @@ scan_target() {
         FINDINGS+=("LOW|Internal/real hostname disclosed via OAuth/OIDC callback URL: $INTERNAL_HOST")
     fi
     if [[ "$MFA_ENFORCED" != "true" ]]; then
-        FINDINGS+=("MED|MFA not enforced org-wide (enabled=$MFA_ENABLED, enforced=$MFA_ENFORCED)")
+        FINDINGS+=("HIGH|MFA not enforced org-wide (enabled=$MFA_ENABLED, enforced=$MFA_ENFORCED)")
     fi
     if [[ "$SHOW_SETUP" != "false" ]]; then
         FINDINGS+=("HIGH|Setup wizard may still be open (no owner account confirmed) — potential unauthenticated admin takeover")
@@ -490,6 +490,34 @@ scan_target() {
         else
             NUCLEI_OUT="nuclei not installed — skipped"
         fi
+    fi
+
+    # Fold nuclei matches into the same risk summary as everything else,
+    # instead of leaving them in their own disconnected section. Nuclei's
+    # own severity tag drives ours; multiple matchers on the same template
+    # (e.g. "CVE-2026-21858:status-2", ":dsl-3", ":word-1") are the same
+    # underlying finding and get collapsed to one line, not three.
+    if [[ -n "$NUCLEI_OUT" && "$NUCLEI_OUT" != "nuclei not installed"* ]]; then
+        local -A NUCLEI_SEEN=()
+        while IFS= read -r nline; do
+            [[ -z "$nline" ]] && continue
+            if [[ "$nline" =~ ^\[([^\]]+)\]\ \[([^\]]+)\]\ \[([^\]]+)\]\ (.*)$ ]]; then
+                local ntmpl="${BASH_REMATCH[1]}" nproto="${BASH_REMATCH[2]}" nsev="${BASH_REMATCH[3]}" nrest="${BASH_REMATCH[4]}"
+                local nbase="${ntmpl%%:*}"
+                local nmysev=""
+                case "${nsev,,}" in
+                    critical) nmysev="CRIT" ;;
+                    high)     nmysev="HIGH" ;;
+                    medium)   nmysev="MED" ;;
+                    low)      nmysev="LOW" ;;
+                    *)        nmysev="" ;;  # info/unknown - detection only, not a risk line
+                esac
+                if [[ -n "$nmysev" && -z "${NUCLEI_SEEN[$nbase]:-}" ]]; then
+                    NUCLEI_SEEN[$nbase]=1
+                    FINDINGS+=("$nmysev|nuclei: $nbase ($nproto, $nsev) — $nrest")
+                fi
+            fi
+        done <<< "$NUCLEI_OUT"
     fi
 
     # -------------------------------------------------------------------
