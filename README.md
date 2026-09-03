@@ -1,12 +1,32 @@
-<div style="display: flex; justify-content: center;">
-  <img src="img/n8ked-logo.png" alt="bEERRRRR" width="500" height="500">
+<div align="center">
+<a href="https://blackhillsinfosec.com"><img width="500" height="500" src="img/n8ked-logo.png" alt="n8ked Logo" /></a>
+<hr>
+  <a href="https://github.com/blackhillsinfosec/n8ked/actions"><img alt="GitHub Workflow Status" src="https://img.shields.io/github/actions/workflow/status/her3ticAVI/n8ked/.github%2Fworkflows%2Fpython-app.yml?style=flat-square"></a>
+  &nbsp;
+  <a href="https://discord.com/invite/bhis"><img alt="Discord" src="https://img.shields.io/discord/967097582721572934?label=Discord&color=7289da&style=flat-square" /></a>
+  &nbsp;
+  <a href="https://github.com/her3ticAVI/n8ked/graphs/contributors"><img alt="Contributors" src="https://img.shields.io/github/contributors-anon/her3ticAVI/n8ked?color=yellow&style=flat-square" /></a>
+  &nbsp;
+  <a href="https://x.com/BHinfoSecurity"><img src="https://img.shields.io/badge/follow-BHIS-1DA1F2?logo=twitter&style=flat-square" alt="BHIS Twitter" /></a>
+  &nbsp;
+  <a href="https://github.com/her3ticAVI/n8ked/stargazers"><img src="https://img.shields.io/github/stars/her3ticAVI/n8ked?style=flat-square&color=rgb(255%2C218%2C185)" alt="n8ked Stars" /></a>
+
+<p class="align center">
+<h4><code>n8ked</code> is an unauthenticated exposure and misconfiguration auditor for <a href="https://n8n.io">n8n</a> instances found during external/internal recon. It starts from n8n's by-design unauthenticated endpoints, checks whether endpoints that shouldn't be reachable without a login actually are, and scans what comes back for hardcoded secrets — all read-only, no exploitation.</h4>
+</p>
+
+<div style="text-align: center;">
+  <h4>
+    <a target="_blank" href="#usage" rel="dofollow"><strong>Usage</strong></a>&nbsp;·&nbsp;
+    <a target="_blank" href="#features" rel="dofollow"><strong>Features</strong></a>&nbsp;·&nbsp;
+    <a target="_blank" href="#understanding-the-output" rel="dofollow"><strong>Understanding Output</strong></a>&nbsp;·&nbsp;
+    <a target="_blank" href="#scope-and-safety-notes" rel="dofollow"><strong>Scope &amp; Safety</strong></a>
+  </h4>
+</div>
+<hr>
 </div>
 
-# n8ked - n8n auditor
-
-Unauthenticated exposure and misconfiguration auditor for [n8n](https://n8n.io) instances found during external/internal recon.
-
-n8n exposes several endpoints without authentication by design (`/rest/settings`, `/healthz`). n8ked uses those as a starting point, then checks whether the endpoints that *shouldn't* be reachable without a login actually are — and if they are, scans what comes back for hardcoded secrets. Everything the tool does is read-only GET traffic (plus one optional, single, user-supplied credential check against `/rest/login`). It doesn't brute-force, and it doesn't exploit anything — it audits access control and looks for accidental exposure.
+<div align="left">
 
 ## Why
 
@@ -41,7 +61,7 @@ Tested on Kali; should run anywhere with a reasonably modern bash and GNU coreut
 ## Installation
 
 ```bash
-git clone <this-repo>
+git clone https://github.com/blackhillsinfosec/n8ked.git
 cd n8ked
 chmod +x n8ked.sh
 ```
@@ -127,3 +147,10 @@ Exit codes: `0` = nothing Critical/High found on any target, `1` = at least one 
 - Normalize duplicate origins in `--eyewitness` mode (e.g. `host` and `host:80` currently probe separately)
 - Optional concurrency for large `--file`/`--eyewitness` runs
 - CSV output alongside `--json`
+
+</div>
+
+<hr>
+<div align="center">
+Made with ❤️ by Black Hills Infosec
+</div>
