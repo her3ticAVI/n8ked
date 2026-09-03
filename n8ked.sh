@@ -407,7 +407,7 @@ scan_target() {
     [[ "$TARGET" == https://* ]] && IS_HTTPS=true
 
     if [[ "$IS_HTTPS" == false ]]; then
-        FINDINGS+=("HIGH|Service reachable over plain HTTP (no TLS) at $TARGET")
+        FINDINGS+=("MED|Service reachable over plain HTTP (no TLS) at $TARGET")
     elif [[ "$HAS_HSTS" == false ]]; then
         FINDINGS+=("LOW|HSTS header missing over HTTPS")
     fi
@@ -492,32 +492,58 @@ scan_target() {
         fi
     fi
 
-    # Fold nuclei matches into the same risk summary as everything else,
-    # instead of leaving them in their own disconnected section. Nuclei's
-    # own severity tag drives ours; multiple matchers on the same template
-    # (e.g. "CVE-2026-21858:status-2", ":dsl-3", ":word-1") are the same
-    # underlying finding and get collapsed to one line, not three.
-    if [[ -n "$NUCLEI_OUT" && "$NUCLEI_OUT" != "nuclei not installed"* ]]; then
-        local -A NUCLEI_SEEN=()
-        while IFS= read -r nline; do
-            [[ -z "$nline" ]] && continue
-            if [[ "$nline" =~ ^\[([^\]]+)\]\ \[([^\]]+)\]\ \[([^\]]+)\]\ (.*)$ ]]; then
-                local ntmpl="${BASH_REMATCH[1]}" nproto="${BASH_REMATCH[2]}" nsev="${BASH_REMATCH[3]}" nrest="${BASH_REMATCH[4]}"
-                local nbase="${ntmpl%%:*}"
-                local nmysev=""
-                case "${nsev,,}" in
-                    critical) nmysev="CRIT" ;;
-                    high)     nmysev="HIGH" ;;
-                    medium)   nmysev="MED" ;;
-                    low)      nmysev="LOW" ;;
-                    *)        nmysev="" ;;  # info/unknown - detection only, not a risk line
-                esac
-                if [[ -n "$nmysev" && -z "${NUCLEI_SEEN[$nbase]:-}" ]]; then
-                    NUCLEI_SEEN[$nbase]=1
-                    FINDINGS+=("$nmysev|nuclei: $nbase ($nproto, $nsev) — $nrest")
+    # Fold nuclei's CVE matches into the risk summary as ONE rolled-up
+    # "Unpatched software" finding rather than one line per CVE — multiple
+    # matchers on the same template (e.g. "CVE-2026-21858:status-2",
+    # ":dsl-3", ":word-1") are the same underlying finding and get
+    # collapsed first, then every distinct CVE found on this host is
+    # merged into a single finding whose severity is the HIGHEST severity
+    # among them (so one Critical CVE makes the whole line Critical even
+    # if others matched Medium). The full per-template nuclei output is
+    # still shown verbatim in its own report section for detail/evidence.
+    local NUCLEI_RAN=false
+    if [[ "$RUN_NUCLEI" == true ]]; then
+        NUCLEI_RAN=true
+        if [[ -n "$NUCLEI_OUT" && "$NUCLEI_OUT" != "nuclei not installed"* ]]; then
+            local -A NUCLEI_SEEN=()
+            local -a CVE_IDS=()
+            local -a CVE_SEVS=()
+            local WORST_SEV="" WORST_RANK=-1
+            sev_rank() { case "$1" in CRIT) echo 4;; HIGH) echo 3;; MED) echo 2;; LOW) echo 1;; *) echo 0;; esac; }
+            while IFS= read -r nline; do
+                [[ -z "$nline" ]] && continue
+                if [[ "$nline" =~ ^\[([^\]]+)\]\ \[([^\]]+)\]\ \[([^\]]+)\]\ (.*)$ ]]; then
+                    local ntmpl="${BASH_REMATCH[1]}" nsev="${BASH_REMATCH[3]}"
+                    local nbase="${ntmpl%%:*}"
+                    local nmysev=""
+                    case "${nsev,,}" in
+                        critical) nmysev="CRIT" ;;
+                        high)     nmysev="HIGH" ;;
+                        medium)   nmysev="MED" ;;
+                        low)      nmysev="LOW" ;;
+                        *)        nmysev="" ;;  # info/unknown - detection only, not a vuln
+                    esac
+                    if [[ -n "$nmysev" && -z "${NUCLEI_SEEN[$nbase]:-}" ]]; then
+                        NUCLEI_SEEN[$nbase]=1
+                        CVE_IDS+=("$nbase")
+                        CVE_SEVS+=("${nsev,,}")
+                        local r; r=$(sev_rank "$nmysev")
+                        if [[ "$r" -gt "$WORST_RANK" ]]; then
+                            WORST_RANK="$r"
+                            WORST_SEV="$nmysev"
+                        fi
+                    fi
                 fi
+            done <<< "$NUCLEI_OUT"
+            if [[ ${#CVE_IDS[@]} -gt 0 ]]; then
+                local cve_list=""
+                for i in "${!CVE_IDS[@]}"; do
+                    [[ -n "$cve_list" ]] && cve_list+=", "
+                    cve_list+="${CVE_IDS[$i]} (${CVE_SEVS[$i]})"
+                done
+                FINDINGS+=("$WORST_SEV|Unpatched software — n8n $VERSION is affected by known CVE(s): $cve_list")
             fi
-        done <<< "$NUCLEI_OUT"
+        fi
     fi
 
     # -------------------------------------------------------------------
@@ -548,6 +574,7 @@ print(json.dumps(out))
   "mfa_enforced": "$MFA_ENFORCED",
   "internal_hostname_disclosed": "$INTERNAL_HOST",
   "credential_test": "$([ -n "$TEST_CRED" ] && echo "$CRED_RESULT" || echo "not run")",
+  "nuclei_ran": $NUCLEI_RAN,
   "cors": "$CORS_VERDICT",
   "endpoint_exposure": [$(
       for e in "${ENDPOINT_RESULTS[@]}"; do
@@ -583,25 +610,34 @@ EOF
     kv "Auth method"          "$AUTH_METHOD"
     kv "Setup already done"   "$( [[ "$SHOW_SETUP" == "false" ]] && echo "yes (admin exists)" || echo "NO — first-run setup may be open" )" \
         "$( [[ "$SHOW_SETUP" == "false" ]] && echo "$C_GRN" || echo "$C_RED" )"
-    kv "MFA enabled / enforced" "$MFA_ENABLED / $MFA_ENFORCED"
-    kv "SAML / LDAP / OIDC"   "$SAML_ON / $LDAP_ON / $OIDC_ON"
+    kv "MFA enabled"          "$MFA_ENABLED" "$( [[ "$MFA_ENABLED" == "true" ]] && echo "$C_GRN" || echo "$C_RED" )"
+    kv "MFA enforced"         "$MFA_ENFORCED" "$( [[ "$MFA_ENFORCED" == "true" ]] && echo "$C_GRN" || echo "$C_RED" )"
+    kv "SAML SSO"             "$SAML_ON"
+    kv "LDAP"                 "$LDAP_ON"
+    kv "OIDC SSO"             "$OIDC_ON"
     kv "Auth cookie 'secure'" "$AUTHCOOKIE_SECURE"
     footer
 
     section "Access Control — Unauthenticated Endpoint Exposure"
+    printf "%s│%s  %-3s %-30s %-6s %-26s %s\n" "$C_CYN" "$C_RESET" "" "STATUS" "[CODE]" "ENDPOINT" "DESCRIPTION"
     for e in "${ENDPOINT_RESULTS[@]}"; do
         IFS='|' read -r ep label verdict status <<< "$e"
         case "$verdict" in
             EXPOSED)
-                printf "%s│%s  %s✗ EXPOSED %-8s%s %-28s %s(%s)%s\n" "$C_CYN" "$C_RESET" "$C_RED" "[$status]" "$C_RESET" "$ep" "$C_DIM" "$label" "$C_RESET" ;;
+                printf "%s│%s  %s✗%s  %s%-30s%s %-6s %-26s %s(%s)%s\n" \
+                    "$C_CYN" "$C_RESET" "$C_RED" "$C_RESET" "$C_RED" "ACCESSIBLE WITHOUT AUTH" "$C_RESET" "[$status]" "$ep" "$C_DIM" "$label" "$C_RESET" ;;
             PROTECTED)
-                printf "%s│%s  %s✓ ok %-13s%s %-28s %s(%s)%s\n" "$C_CYN" "$C_RESET" "$C_GRN" "[$status]" "$C_RESET" "$ep" "$C_DIM" "$label" "$C_RESET" ;;
+                printf "%s│%s  %s✓%s  %s%-30s%s %-6s %-26s %s(%s)%s\n" \
+                    "$C_CYN" "$C_RESET" "$C_GRN" "$C_RESET" "$C_GRN" "PROTECTED — AUTH REQUIRED" "$C_RESET" "[$status]" "$ep" "$C_DIM" "$label" "$C_RESET" ;;
             EMPTY)
-                printf "%s│%s  %s✓ empty %-10s%s %-28s %s(%s)%s\n" "$C_CYN" "$C_RESET" "$C_GRN" "[$status]" "$C_RESET" "$ep" "$C_DIM" "$label" "$C_RESET" ;;
+                printf "%s│%s  %s✓%s  %s%-30s%s %-6s %-26s %s(%s)%s\n" \
+                    "$C_CYN" "$C_RESET" "$C_GRN" "$C_RESET" "$C_WHT" "REACHABLE, NO DATA RETURNED" "$C_RESET" "[$status]" "$ep" "$C_DIM" "$label" "$C_RESET" ;;
             NOT-ENABLED)
-                printf "%s│%s  %s- n/a %-13s%s %-28s %s(%s)%s\n" "$C_CYN" "$C_RESET" "$C_DIM" "[$status]" "$C_RESET" "$ep" "$C_DIM" "$label" "$C_RESET" ;;
+                printf "%s│%s  %s-%s  %s%-30s%s %-6s %-26s %s(%s)%s\n" \
+                    "$C_CYN" "$C_RESET" "$C_DIM" "$C_RESET" "$C_DIM" "NOT ENABLED" "$C_RESET" "[$status]" "$ep" "$C_DIM" "$label" "$C_RESET" ;;
             *)
-                printf "%s│%s  %s? %-16s%s %-28s %s(%s)%s\n" "$C_CYN" "$C_RESET" "$C_YEL" "[$verdict]" "$C_RESET" "$ep" "$C_DIM" "$label" "$C_RESET" ;;
+                printf "%s│%s  %s?%s  %s%-30s%s %-6s %-26s %s(%s)%s\n" \
+                    "$C_CYN" "$C_RESET" "$C_YEL" "$C_RESET" "$C_YEL" "UNKNOWN — REVIEW MANUALLY" "$C_RESET" "[$status]" "$ep" "$C_DIM" "$label" "$C_RESET" ;;
         esac
     done
     footer
@@ -668,6 +704,9 @@ EOF
             done
         fi
         footer
+    else
+        echo
+        printf "%s(known-CVE check skipped — rerun with --nuclei to check the detected version against nuclei's n8n-tagged CVE templates)%s\n" "$C_DIM" "$C_RESET"
     fi
 
     # -------------------------------------------------------------------
