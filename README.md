@@ -20,6 +20,7 @@
     <a target="_blank" href="#usage" rel="dofollow"><strong>Usage</strong></a>&nbsp;·&nbsp;
     <a target="_blank" href="#features" rel="dofollow"><strong>Features</strong></a>&nbsp;·&nbsp;
     <a target="_blank" href="#understanding-the-output" rel="dofollow"><strong>Understanding Output</strong></a>&nbsp;·&nbsp;
+    <a target="_blank" href="#for-testers" rel="dofollow"><strong>For Testers</strong></a>&nbsp;·&nbsp;
     <a target="_blank" href="#scope-and-safety-notes" rel="dofollow"><strong>Scope &amp; Safety</strong></a>
   </h4>
 </div>
@@ -134,6 +135,16 @@ Findings roll up into a severity-tagged summary at the end of each report:
 - **Low** — missing security headers, internal hostname disclosure, wildcard (non-credentialed) CORS, live webhook-test endpoint
 
 Exit codes: `0` = nothing Critical/High found on any target, `1` = at least one Critical/High finding, `2` = target(s) couldn't be confirmed as n8n.
+
+## For Testers
+
+### Report language
+
+For write-ups, use something like the following in the methodology/tools section (edit to match what was actually run):
+
+> n8ked was used to audit the n8n instance(s) in scope for unauthenticated exposure and misconfiguration. The tool issued read-only HTTP requests via curl against n8n's documented REST and API endpoints to determine whether access controls, MFA enforcement, CORS policy, and security headers were configured as expected, and inspected any data returned from unauthenticated requests for hardcoded secrets such as API keys, tokens, and credentials. Where nuclei was used, only official, signed `n8n`-tagged templates were run against known CVEs; no custom or hand-rolled exploit code was executed against the target(s). No authentication bypass, data modification, or exploitation was attempted at any point during this activity.
+
+Adjust the language if `--test-cred` or `--nuclei` weren't used on a given engagement, since both are optional and each carries its own disclosure implications (a credential test, however limited, is still an authentication attempt against the client's system).
 
 ## Scope and safety notes
 
