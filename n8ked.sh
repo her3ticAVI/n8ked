@@ -455,7 +455,7 @@ scan_target() {
     # Existing checks: webhook-test, credential test, nuclei
     # -------------------------------------------------------------------
     if [[ "$WEBHOOK_STATUS" =~ ^2 ]]; then
-        FINDINGS+=("LOW|Webhook test endpoint responded with HTTP $WEBHOOK_STATUS (may expose triggerable automations)")
+        FINDINGS+=("MED|Webhook test endpoint responded with HTTP $WEBHOOK_STATUS (may expose triggerable automations without authentication)")
     fi
     if [[ -n "$INTERNAL_HOST" ]]; then
         FINDINGS+=("LOW|Internal/real hostname disclosed via OAuth/OIDC callback URL: $INTERNAL_HOST")
@@ -486,7 +486,7 @@ scan_target() {
     local NUCLEI_OUT=""
     if [[ "$RUN_NUCLEI" == true ]]; then
         if command -v nuclei >/dev/null 2>&1; then
-            NUCLEI_OUT=$(nuclei -u "$TARGET" -tags n8n -silent 2>/dev/null)
+            NUCLEI_OUT=$(nuclei -u "$TARGET" -tags n8n -silent -no-color 2>/dev/null)
         else
             NUCLEI_OUT="nuclei not installed — skipped"
         fi
@@ -511,6 +511,11 @@ scan_target() {
             local WORST_SEV="" WORST_RANK=-1
             sev_rank() { case "$1" in CRIT) echo 4;; HIGH) echo 3;; MED) echo 2;; LOW) echo 1;; *) echo 0;; esac; }
             while IFS= read -r nline; do
+                # Strip ANSI color codes and any stray \r — nuclei can emit
+                # color even when not attached to a real TTY depending on
+                # version/environment, which otherwise makes the ^\[ anchor
+                # below silently fail to match and drops every CVE line.
+                nline=$(printf '%s' "$nline" | sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/\r$//')
                 [[ -z "$nline" ]] && continue
                 if [[ "$nline" =~ ^\[([^\]]+)\]\ \[([^\]]+)\]\ \[([^\]]+)\]\ (.*)$ ]]; then
                     local ntmpl="${BASH_REMATCH[1]}" nsev="${BASH_REMATCH[3]}"
