@@ -152,5 +152,5 @@ Exit codes: `0` = nothing Critical/High found on any target, `1` = at least one 
 
 <hr>
 <div align="center">
-Made with ❤️ by Black Hills Infosec
+Made with ❤️ by The Heretic
 </div>
