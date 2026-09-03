@@ -2,16 +2,6 @@
 #
 # n8ked.sh — n8n unauthenticated exposure & misconfiguration auditor
 #
-# Goes beyond version/MFA fingerprinting: checks whether n8n's sensitive
-# REST endpoints are reachable without authentication (workflows,
-# credentials, users, executions, the public API, Prometheus metrics),
-# scans anything that comes back exposed for hardcoded secrets (API keys,
-# bearer tokens, private keys, connection strings, etc.), checks security
-# headers, CORS configuration, and common accidentally-exposed config
-# files (.env, .git, package.json). Everything is read-only GET traffic —
-# no exploitation, no brute forcing beyond one optional user-supplied
-# credential pair.
-#
 # Usage:
 #   ./n8ked.sh <target> [options]
 #   ./n8ked.sh --file targets.txt [options]
