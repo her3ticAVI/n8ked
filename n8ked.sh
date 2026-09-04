@@ -12,7 +12,15 @@
 #   --eyewitness DIR         Pull candidate hosts from an EyeWitness results
 #                            folder (open_ports.csv and/or report*.html),
 #                            probe each for n8n, and audit only the hits
-#   --json                   Output one JSON object per host instead of the pretty report
+#   --json                   Output one compact JSON object per host instead of
+#                            (or alongside, on stderr vs stdout) the pretty
+#                            report — true JSONL, one host per line, safe to
+#                            pipe into jq or anything that reads line-by-line
+#   --csv-out FILE           Append one CSV row per finding to FILE (created
+#                            fresh with a header at the start of the run) —
+#                            target,severity,category,message. Written
+#                            alongside whatever else you're outputting;
+#                            clean hosts still get a row so none go missing
 #   --test-cred user:pass    Try exactly one credential pair against /rest/login
 #   --userpass FILE          Try every "user:pass" line in FILE against /rest/login
 #                            (stops at the first valid hit; use --brute-delay to
@@ -48,6 +56,7 @@
 #   ./n8ked.sh 10.0.0.5:5678 --userpass creds.txt --brute-delay 2
 #   ./n8ked.sh 10.0.0.5:5678 --webhook-brute paths.txt --webhook-methods GET,POST
 #   ./n8ked.sh --file scope-hosts.txt --json > results.jsonl
+#   ./n8ked.sh --file scope-hosts.txt --csv-out findings.csv
 #   ./n8ked.sh --eyewitness ~/engagements/acme/EyeWitness-Results
 #
 # Exit codes: 0 = no Critical/High findings on any target, 1 = at least
@@ -61,6 +70,7 @@ TARGET=""
 TARGET_FILE=""
 EW_DIR=""
 JSON_OUT=false
+CSV_OUT_FILE=""
 TEST_CRED=""
 USERPASS_FILE=""
 BRUTE_DELAY=1
@@ -73,12 +83,13 @@ INCLUDE_TEST_WEBHOOKS=false
 RUN_NUCLEI=false
 NO_COLOR=false
 REVEAL_SECRETS=false
-print_help() { sed -n '2,55p' "$0" | sed 's/^# \{0,1\}//'; }
+print_help() { sed -n '2,64p' "$0" | sed 's/^# \{0,1\}//'; }
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --file) TARGET_FILE="${2:-}"; shift 2 ;;
         --eyewitness) EW_DIR="${2:-}"; shift 2 ;;
         --json) JSON_OUT=true; shift ;;
+        --csv-out) CSV_OUT_FILE="${2:-}"; shift 2 ;;
         --test-cred) TEST_CRED="${2:-}"; shift 2 ;;
         --userpass) USERPASS_FILE="${2:-}"; shift 2 ;;
         --brute-delay) BRUTE_DELAY="${2:-1}"; shift 2 ;;
@@ -140,6 +151,10 @@ else
 fi
 HAVE_PY=false
 command -v python3 >/dev/null 2>&1 && HAVE_PY=true
+if [[ -n "$CSV_OUT_FILE" && "$HAVE_PY" == false ]]; then
+    echo "Error: --csv-out requires python3 (for correct CSV quoting/escaping), which isn't installed." >&2
+    exit 1
+fi
 jget() {
     # jget <json> <dotted.path> [default]
     local json="$1" path="$2" default="${3:-}"
@@ -421,11 +436,19 @@ scan_target() {
         ROOT_HAS_META=true
     fi
     if ! echo "$SETTINGS_JSON" | grep -qE '"instanceId"|"settingsMode"|"userManagement"' && [[ "$ROOT_HAS_META" == false ]]; then
+        local not_n8n_msg="not an n8n instance (no instanceId/settingsMode/userManagement in /rest/settings, no n8n:config meta tag on root page)"
         if [[ "$JSON_OUT" == true ]]; then
-            echo "{\"target\":\"$TARGET\",\"error\":\"not an n8n instance (no instanceId/settingsMode/userManagement in /rest/settings, no n8n:config meta tag on root page)\"}"
+            echo "{\"target\":\"$TARGET\",\"error\":\"$not_n8n_msg\"}"
         else
             echo
             echo "${C_RED}✗ ${TARGET} does not look like an n8n instance (no instanceId/settingsMode/userManagement in /rest/settings, no n8n:config meta tag on root page).${C_RESET}"
+        fi
+        if [[ -n "$CSV_OUT_FILE" && "$HAVE_PY" == true ]]; then
+            N8KED_CSV_FILE="$CSV_OUT_FILE" N8KED_TARGET="$TARGET" N8KED_MSG="$not_n8n_msg" python3 -c '
+import csv, os
+with open(os.environ["N8KED_CSV_FILE"], "a", newline="") as f:
+    csv.writer(f).writerow([os.environ["N8KED_TARGET"], "INFO", "non-n8n", os.environ["N8KED_MSG"]])
+' 2>/dev/null
         fi
         NOT_N8N_SEEN=true
         return
@@ -527,7 +550,7 @@ scan_target() {
         fi
         ENDPOINT_RESULTS+=("$ep|$label|$verdict|$status")
         if [[ "$verdict" == "EXPOSED" ]]; then
-            FINDINGS+=("$sev|Unauthenticated access to $ep ($label) — HTTP $status returned real data with no auth required")
+            FINDINGS+=("$sev|access-control|Unauthenticated access to $ep ($label) — HTTP $status returned real data with no auth required")
         fi
     done
     # -------------------------------------------------------------------
@@ -542,7 +565,7 @@ scan_target() {
         local head_status
         head_status=$($CURL -o /dev/null -w '%{http_code}' -I "$TARGET$ep" 2>/dev/null)
         if [[ "$head_status" == "200" ]]; then
-            FINDINGS+=("HIGH|HTTP method tampering — $ep ($label) is PROTECTED via GET (401/403) but returns HTTP 200 via HEAD, suggesting auth is enforced per-verb rather than per-path")
+            FINDINGS+=("HIGH|access-control|HTTP method tampering — $ep ($label) is PROTECTED via GET (401/403) but returns HTTP 200 via HEAD, suggesting auth is enforced per-verb rather than per-path")
         fi
     done
     # -------------------------------------------------------------------
@@ -561,7 +584,7 @@ scan_target() {
     fi
     for hit in "${SECRET_HITS[@]}"; do
         IFS='|' read -r stype slabel sval <<< "$hit"
-        FINDINGS+=("CRIT|Hardcoded secret found — $stype in $slabel: $sval")
+        FINDINGS+=("CRIT|secret|Hardcoded secret found — $stype in $slabel: $sval")
     done
     # -------------------------------------------------------------------
     # Security headers
@@ -583,13 +606,13 @@ scan_target() {
         IS_HTTPS=true
     fi
     if [[ "$IS_HTTPS" == false ]]; then
-        FINDINGS+=("MED|Service reachable over plain HTTP (no TLS) at $TARGET")
+        FINDINGS+=("MED|tls|Service reachable over plain HTTP (no TLS) at $TARGET")
     elif [[ "$HAS_HSTS" == false ]]; then
-        FINDINGS+=("LOW|HSTS header missing over HTTPS")
+        FINDINGS+=("LOW|header|HSTS header missing over HTTPS")
     fi
-    [[ "$HAS_XFO" == false ]] && FINDINGS+=("LOW|X-Frame-Options header missing (clickjacking hardening)")
-    [[ "$HAS_XCTO" == false ]] && FINDINGS+=("LOW|X-Content-Type-Options header missing")
-    [[ "$HAS_CSP" == false ]] && FINDINGS+=("LOW|Content-Security-Policy header missing")
+    [[ "$HAS_XFO" == false ]] && FINDINGS+=("LOW|header|X-Frame-Options header missing (clickjacking hardening)")
+    [[ "$HAS_XCTO" == false ]] && FINDINGS+=("LOW|header|X-Content-Type-Options header missing")
+    [[ "$HAS_CSP" == false ]] && FINDINGS+=("LOW|header|Content-Security-Policy header missing")
     # -------------------------------------------------------------------
     # Header disclosure — the standard four checks above only look for
     # ABSENCE of specific headers. This looks for PRESENCE of headers that
@@ -606,7 +629,7 @@ scan_target() {
         fi
     done < <(echo "$ROOT_HEADERS" | sort -u)
     for h in "${DISCLOSURE_HDRS[@]}"; do
-        FINDINGS+=("LOW|Response header discloses internal information: $h")
+        FINDINGS+=("LOW|header|Response header discloses internal information: $h")
     done
     # -------------------------------------------------------------------
     # CORS check
@@ -619,13 +642,13 @@ scan_target() {
     if [[ -n "$ACAO" ]]; then
         if [[ "$ACAO" == "https://n8ked-cors-probe.invalid" && "${ACAC,,}" == "true" ]]; then
             CORS_VERDICT="reflect-credentialed"
-            FINDINGS+=("CRIT|CORS reflects arbitrary Origin with Access-Control-Allow-Credentials: true — any website can make authenticated requests on a victim's behalf")
+            FINDINGS+=("CRIT|cors|CORS reflects arbitrary Origin with Access-Control-Allow-Credentials: true — any website can make authenticated requests on a victim's behalf")
         elif [[ "$ACAO" == "https://n8ked-cors-probe.invalid" ]]; then
             CORS_VERDICT="reflect"
-            FINDINGS+=("MED|CORS reflects arbitrary Origin header (no credentials flag) — verify intent")
+            FINDINGS+=("MED|cors|CORS reflects arbitrary Origin header (no credentials flag) — verify intent")
         elif [[ "$ACAO" == "*" ]]; then
             CORS_VERDICT="wildcard"
-            FINDINGS+=("LOW|CORS Access-Control-Allow-Origin: * (no credentials observed)")
+            FINDINGS+=("LOW|cors|CORS Access-Control-Allow-Origin: * (no credentials observed)")
         fi
     fi
     # -------------------------------------------------------------------
@@ -639,35 +662,35 @@ scan_target() {
         st=$($CURL -o "$bf" -w '%{http_code}' "$TARGET$p" 2>/dev/null)
         if [[ "$st" == "200" ]] && ! diff -q "$bf" "$ROOT_BODY_FILE" >/dev/null 2>&1 && [[ -s "$bf" ]]; then
             EXPOSED_FILES+=("$p")
-            FINDINGS+=("MED|Possible file exposure at $p (HTTP 200, distinct content — verify manually)")
+            FINDINGS+=("MED|file-exposure|Possible file exposure at $p (HTTP 200, distinct content — verify manually)")
         fi
     done
     # -------------------------------------------------------------------
     # Existing checks: webhook-test, credential test, nuclei
     # -------------------------------------------------------------------
     if [[ "$WEBHOOK_LIVE" == true ]]; then
-        FINDINGS+=("MED|Webhook test endpoint responded with HTTP $WEBHOOK_STATUS and distinct content (may expose triggerable automations without authentication)")
+        FINDINGS+=("MED|webhook|Webhook test endpoint responded with HTTP $WEBHOOK_STATUS and distinct content (may expose triggerable automations without authentication)")
     fi
     if [[ "$WEBHOOK_PROD_LIVE" == true ]]; then
-        FINDINGS+=("HIGH|Production webhook base (/webhook/) responded with HTTP $WEBHOOK_PROD_STATUS and distinct content — this is the persistent, always-on unauthenticated trigger surface (unlike /webhook-test/, which only lives while a workflow is open in the editor)")
+        FINDINGS+=("HIGH|webhook|Production webhook base (/webhook/) responded with HTTP $WEBHOOK_PROD_STATUS and distinct content — this is the persistent, always-on unauthenticated trigger surface (unlike /webhook-test/, which only lives while a workflow is open in the editor)")
     fi
     if [[ -n "$INTERNAL_HOST" ]]; then
-        FINDINGS+=("LOW|Internal/real hostname disclosed via OAuth/OIDC callback URL: $INTERNAL_HOST")
+        FINDINGS+=("LOW|disclosure|Internal/real hostname disclosed via OAuth/OIDC callback URL: $INTERNAL_HOST")
     fi
     if [[ "$MFA_ENFORCED" == "false" ]]; then
-        FINDINGS+=("HIGH|MFA not enforced org-wide (enabled=$MFA_ENABLED, enforced=$MFA_ENFORCED)")
+        FINDINGS+=("HIGH|mfa|MFA not enforced org-wide (enabled=$MFA_ENABLED, enforced=$MFA_ENFORCED)")
     elif [[ "$MFA_ENFORCED" != "true" ]]; then
-        FINDINGS+=("LOW|MFA posture could not be determined — mfa.* fields absent from /rest/settings on this n8n release (verify manually, e.g. during credentialed testing)")
+        FINDINGS+=("LOW|mfa|MFA posture could not be determined — mfa.* fields absent from /rest/settings on this n8n release (verify manually, e.g. during credentialed testing)")
     fi
     if [[ "$SHOW_SETUP" != "false" ]]; then
-        FINDINGS+=("HIGH|Setup wizard may still be open (no owner account confirmed) — potential unauthenticated admin takeover")
+        FINDINGS+=("HIGH|setup|Setup wizard may still be open (no owner account confirmed) — potential unauthenticated admin takeover")
     fi
     local CRED_RESULT=""
     if [[ -n "$TEST_CRED" ]]; then
         local CU="${TEST_CRED%%:*}" CP="${TEST_CRED#*:}"
         CRED_RESULT=$(n8n_try_login "$TARGET" "$CU" "$CP")
         if [[ "$CRED_RESULT" == "success" ]]; then
-            FINDINGS+=("CRIT|Supplied credentials ($CU) are VALID — full editor access obtained")
+            FINDINGS+=("CRIT|credential-test|Supplied credentials ($CU) are VALID — full editor access obtained")
         fi
     fi
     # -------------------------------------------------------------------
@@ -691,7 +714,7 @@ scan_target() {
             bres=$(n8n_try_login "$TARGET" "$bu" "$bp")
             if [[ "$bres" == "success" ]]; then
                 BRUTE_VALID+=("$pair")
-                FINDINGS+=("CRIT|Brute force via --userpass found VALID credentials ($bu) — full editor access obtained")
+                FINDINGS+=("CRIT|credential-test|Brute force via --userpass found VALID credentials ($bu) — full editor access obtained")
                 echo "[n8ked]   -> VALID: $bu" >&2
                 [[ "$STOP_ON_SUCCESS" == true ]] && break
             fi
@@ -742,19 +765,19 @@ scan_target() {
                         echo "[n8ked]   -> $wh_verdict [$wh_status]: /$wh_base/$cand ($wh_method)" >&2
                         case "$wh_verdict" in
                             TRIGGERED)
-                                FINDINGS+=("CRIT|Unauthenticated webhook triggered — /$wh_base/$cand ($wh_method) returned HTTP $wh_status; this is a live, real invocation of that workflow and satisfies the webhook precondition for n8n RCE-style CVEs")
+                                FINDINGS+=("CRIT|webhook|Unauthenticated webhook triggered — /$wh_base/$cand ($wh_method) returned HTTP $wh_status; this is a live, real invocation of that workflow and satisfies the webhook precondition for n8n RCE-style CVEs")
                                 ;;
                             ERROR)
-                                FINDINGS+=("HIGH|Registered webhook found — /$wh_base/$cand ($wh_method) returned HTTP $wh_status (workflow errored on invocation, but the path/method is real and reachable)")
+                                FINDINGS+=("HIGH|webhook|Registered webhook found — /$wh_base/$cand ($wh_method) returned HTTP $wh_status (workflow errored on invocation, but the path/method is real and reachable)")
                                 ;;
                             AUTH-REQUIRED)
-                                FINDINGS+=("MED|Registered webhook found — /$wh_base/$cand ($wh_method) requires its own auth (HTTP $wh_status); path is confirmed to exist")
+                                FINDINGS+=("MED|webhook|Registered webhook found — /$wh_base/$cand ($wh_method) requires its own auth (HTTP $wh_status); path is confirmed to exist")
                                 ;;
                             TIMEOUT)
-                                FINDINGS+=("MED|Possible webhook trigger — /$wh_base/$cand ($wh_method) timed out without responding; the workflow may still be executing")
+                                FINDINGS+=("MED|webhook|Possible webhook trigger — /$wh_base/$cand ($wh_method) timed out without responding; the workflow may still be executing")
                                 ;;
                             *)
-                                FINDINGS+=("MED|Unexpected response from /$wh_base/$cand ($wh_method): HTTP $wh_status — review manually")
+                                FINDINGS+=("MED|webhook|Unexpected response from /$wh_base/$cand ($wh_method): HTTP $wh_status — review manually")
                                 ;;
                         esac
                     fi
@@ -786,7 +809,7 @@ scan_target() {
             LOCKOUT_RESULT="throttled"
         else
             LOCKOUT_RESULT="not-throttled"
-            FINDINGS+=("MED|No rate-limiting/lockout observed on /rest/login after 8 rapid failed attempts (consistently HTTP ${lockout_statuses[0]:-401}) — brute-force risk")
+            FINDINGS+=("MED|lockout|No rate-limiting/lockout observed on /rest/login after 8 rapid failed attempts (consistently HTTP ${lockout_statuses[0]:-401}) — brute-force risk")
         fi
     fi
     local NUCLEI_OUT=""
@@ -851,65 +874,155 @@ scan_target() {
                     [[ -n "$cve_list" ]] && cve_list+=", "
                     cve_list+="${CVE_IDS[$i]} (${CVE_SEVS[$i]})"
                 done
-                FINDINGS+=("$WORST_SEV|Unpatched software — n8n $VERSION is affected by known CVE(s): $cve_list")
+                FINDINGS+=("$WORST_SEV|cve|Unpatched software — n8n $VERSION is affected by known CVE(s): $cve_list")
             fi
         fi
     fi
     # -------------------------------------------------------------------
     # Output
     # -------------------------------------------------------------------
-    if [[ "$JSON_OUT" == true ]]; then
-        local findings_json="[]"
-        if [[ "$HAVE_PY" == true && ${#FINDINGS[@]} -gt 0 ]]; then
-            findings_json=$(printf '%s\n' "${FINDINGS[@]}" | python3 -c '
-import json, sys
-out = []
-for line in sys.stdin:
-    line = line.rstrip("\n")
-    if not line:
-        continue
-    sev, _, msg = line.partition("|")
-    out.append({"severity": sev, "message": msg})
-print(json.dumps(out))
-')
+    # Exit-code bookkeeping has to happen unconditionally, BEFORE the JSON
+    # branch's early `return` below — otherwise a --json run's exit code
+    # is always 0/2 and never reflects a Critical/High finding, since the
+    # pretty-print path below (the only other place this was computed)
+    # never executes when JSON output is requested.
+    local n_crit_ec=0 n_high_ec=0
+    for f in "${FINDINGS[@]}"; do
+        IFS='|' read -r sev _cat_ec _msg_ec <<< "$f"
+        case "$sev" in
+            CRIT) ((n_crit_ec++)) ;;
+            HIGH) ((n_high_ec++)) ;;
+        esac
+    done
+    if [[ $((n_crit_ec + n_high_ec)) -gt 0 ]]; then
+        HAD_HIGH_OR_CRIT=true
+    fi
+    # -------------------------------------------------------------------
+    # JSON / CSV output. Both are built from the same underlying data in
+    # one python pass (correct escaping for quotes/commas/unicode in
+    # targets or messages, rather than hand-rolled string interpolation).
+    # JSON is always emitted as a single compact line per host — true
+    # JSONL, safe to pipe into jq, a log shipper, or anything that reads
+    # one line at a time — regardless of how many hosts are scanned.
+    # -------------------------------------------------------------------
+    if [[ "$JSON_OUT" == true || -n "$CSV_OUT_FILE" ]]; then
+        printf '%s\n' "${FINDINGS[@]}" > "$TMPDIR/out_findings.txt"
+        printf '%s\n' "${ENDPOINT_RESULTS[@]}" > "$TMPDIR/out_endpoints.txt"
+        printf '%s\n' "${DISCLOSURE_HDRS[@]}" > "$TMPDIR/out_disclosure.txt"
+        printf '%s\n' "${WEBHOOK_BRUTE_HITS[@]}" > "$TMPDIR/out_webhookhits.txt"
+        printf '%s\n' "${BRUTE_VALID[@]}" > "$TMPDIR/out_brutevalid.txt"
+        if [[ "$HAVE_PY" == true ]]; then
+            N8KED_TARGET="$TARGET" \
+            N8KED_VERSION="$VERSION" \
+            N8KED_INSTANCE_ID="$INSTANCE_ID" \
+            N8KED_AUTH_METHOD="$AUTH_METHOD" \
+            N8KED_MFA_ENABLED="$MFA_ENABLED" \
+            N8KED_MFA_ENFORCED="$MFA_ENFORCED" \
+            N8KED_INTERNAL_HOST="$INTERNAL_HOST" \
+            N8KED_WEBHOOK_LIVE="$WEBHOOK_LIVE" \
+            N8KED_WEBHOOK_PROD_LIVE="$WEBHOOK_PROD_LIVE" \
+            N8KED_CRED_TEST="$([ -n "$TEST_CRED" ] && echo "$CRED_RESULT" || echo "not run")" \
+            N8KED_BRUTE_RAN="$([ -n "$USERPASS_FILE" ] && echo true || echo false)" \
+            N8KED_BRUTE_TRIED="$BRUTE_TRIED" \
+            N8KED_BRUTE_TOTAL="$BRUTE_TOTAL" \
+            N8KED_LOCKOUT="$([ "$CHECK_LOCKOUT" == true ] && echo "$LOCKOUT_RESULT" || echo "not run")" \
+            N8KED_WHBRUTE_RAN="$([ -n "$WEBHOOK_BRUTE_FILE" ] && echo true || echo false)" \
+            N8KED_NUCLEI_RAN="$NUCLEI_RAN" \
+            N8KED_CORS="$CORS_VERDICT" \
+            N8KED_EMIT_JSON="$JSON_OUT" \
+            N8KED_CSV_FILE="$CSV_OUT_FILE" \
+            N8KED_FINDINGS_FILE="$TMPDIR/out_findings.txt" \
+            N8KED_ENDPOINTS_FILE="$TMPDIR/out_endpoints.txt" \
+            N8KED_DISCLOSURE_FILE="$TMPDIR/out_disclosure.txt" \
+            N8KED_WHHITS_FILE="$TMPDIR/out_webhookhits.txt" \
+            N8KED_BRUTEVALID_FILE="$TMPDIR/out_brutevalid.txt" \
+            python3 -c '
+import csv, json, os
+
+def read_lines(path):
+    try:
+        with open(path) as f:
+            return [l.rstrip("\n") for l in f if l.strip()]
+    except Exception:
+        return []
+
+def to_bool(s):
+    return str(s).strip().lower() == "true"
+
+env = os.environ.get
+
+findings = []
+for line in read_lines(env("N8KED_FINDINGS_FILE", "")):
+    p = line.split("|", 2)
+    findings.append({
+        "severity": p[0] if len(p) > 0 else "",
+        "category": p[1] if len(p) > 1 else "",
+        "message": p[2] if len(p) > 2 else "",
+    })
+
+endpoints = []
+for line in read_lines(env("N8KED_ENDPOINTS_FILE", "")):
+    p = line.split("|")
+    if len(p) >= 4:
+        endpoints.append({"path": p[0], "label": p[1], "verdict": p[2], "status": p[3]})
+
+webhook_hits = []
+for line in read_lines(env("N8KED_WHHITS_FILE", "")):
+    p = line.split("|")
+    if len(p) >= 5:
+        webhook_hits.append({"base": p[0], "path": p[1], "method": p[2], "verdict": p[3], "status": p[4]})
+
+disclosure_headers = read_lines(env("N8KED_DISCLOSURE_FILE", ""))
+brute_valid_count = len(read_lines(env("N8KED_BRUTEVALID_FILE", "")))
+
+target = env("N8KED_TARGET", "")
+
+if to_bool(env("N8KED_EMIT_JSON", "false")):
+    obj = {
+        "target": target,
+        "version": env("N8KED_VERSION", ""),
+        "instance_id": env("N8KED_INSTANCE_ID", ""),
+        "auth_method": env("N8KED_AUTH_METHOD", ""),
+        "mfa_enabled": env("N8KED_MFA_ENABLED", ""),
+        "mfa_enforced": env("N8KED_MFA_ENFORCED", ""),
+        "internal_hostname_disclosed": env("N8KED_INTERNAL_HOST", ""),
+        "webhook_test_live": to_bool(env("N8KED_WEBHOOK_LIVE", "false")),
+        "webhook_prod_live": to_bool(env("N8KED_WEBHOOK_PROD_LIVE", "false")),
+        "disclosure_headers": disclosure_headers,
+        "credential_test": env("N8KED_CRED_TEST", "not run"),
+        "bruteforce": {
+            "ran": to_bool(env("N8KED_BRUTE_RAN", "false")),
+            "tried": int(env("N8KED_BRUTE_TRIED", "0") or 0),
+            "total": int(env("N8KED_BRUTE_TOTAL", "0") or 0),
+            "valid_count": brute_valid_count,
+        },
+        "lockout_check": env("N8KED_LOCKOUT", "not run"),
+        "webhook_bruteforce": {
+            "ran": to_bool(env("N8KED_WHBRUTE_RAN", "false")),
+            "hits": webhook_hits,
+        },
+        "nuclei_ran": to_bool(env("N8KED_NUCLEI_RAN", "false")),
+        "cors": env("N8KED_CORS", "none"),
+        "endpoint_exposure": endpoints,
+        "findings": findings,
+    }
+    # Single line, no embedded newlines: true JSONL regardless of host count.
+    print(json.dumps(obj, separators=(",", ":")))
+
+csv_path = env("N8KED_CSV_FILE", "")
+if csv_path:
+    with open(csv_path, "a", newline="") as f:
+        w = csv.writer(f)
+        if findings:
+            for fnd in findings:
+                w.writerow([target, fnd["severity"], fnd["category"], fnd["message"]])
+        else:
+            w.writerow([target, "INFO", "none", "No issues flagged."])
+'
+        else
+            [[ "$JSON_OUT" == true ]] && echo "{\"target\":\"$TARGET\",\"error\":\"python3 not available — JSON/CSV output requires python3\"}"
         fi
-        cat <<EOF
-{
-  "target": "$TARGET",
-  "version": "$VERSION",
-  "instance_id": "$INSTANCE_ID",
-  "auth_method": "$AUTH_METHOD",
-  "mfa_enabled": "$MFA_ENABLED",
-  "mfa_enforced": "$MFA_ENFORCED",
-  "internal_hostname_disclosed": "$INTERNAL_HOST",
-  "webhook_test_live": $WEBHOOK_LIVE,
-  "webhook_prod_live": $WEBHOOK_PROD_LIVE,
-  "disclosure_headers": [$(
-      for h in "${DISCLOSURE_HDRS[@]}"; do
-          printf '%s,' "$(printf '%s' "$h" | json_escape)"
-      done | sed 's/,$//'
-  )],
-  "credential_test": "$([ -n "$TEST_CRED" ] && echo "$CRED_RESULT" || echo "not run")",
-  "bruteforce": {"ran": $([ -n "$USERPASS_FILE" ] && echo true || echo false), "tried": $BRUTE_TRIED, "total": $BRUTE_TOTAL, "valid_count": ${#BRUTE_VALID[@]}},
-  "lockout_check": "$([ "$CHECK_LOCKOUT" == true ] && echo "$LOCKOUT_RESULT" || echo "not run")",
-  "webhook_bruteforce": {"ran": $([ -n "$WEBHOOK_BRUTE_FILE" ] && echo true || echo false), "hits": [$(
-      for hit in "${WEBHOOK_BRUTE_HITS[@]}"; do
-          IFS='|' read -r hbase hcand hmethod hverdict hstatus <<< "$hit"
-          printf '{"base":"%s","path":"%s","method":"%s","verdict":"%s","status":"%s"},' "$hbase" "$hcand" "$hmethod" "$hverdict" "$hstatus"
-      done | sed 's/,$//'
-  )]},
-  "nuclei_ran": $NUCLEI_RAN,
-  "cors": "$CORS_VERDICT",
-  "endpoint_exposure": [$(
-      for e in "${ENDPOINT_RESULTS[@]}"; do
-          IFS='|' read -r ep label verdict status <<< "$e"
-          printf '{"path":"%s","label":"%s","verdict":"%s","status":"%s"},' "$ep" "$label" "$verdict" "$status"
-      done | sed 's/,$//'
-  )],
-  "findings": $findings_json
-}
-EOF
-        return
+        [[ "$JSON_OUT" == true ]] && return
     fi
     echo
     printf "%s%s /░ /░    /█▀▀█    /░/░    /█▀▀▀/    /░░░ %s\n" "$C_BOLD" "$C_MAG" "$C_RESET"
@@ -1068,25 +1181,25 @@ EOF
     echo
     printf "%s%sRisk Summary%s\n" "$C_BOLD" "$C_YEL" "$C_RESET"
     for f in "${FINDINGS[@]}"; do
-        IFS='|' read -r sev msg <<< "$f"
+        IFS='|' read -r sev _cat msg <<< "$f"
         case "$sev" in
             CRIT) ((n_crit++)); printf "  %s[CRITICAL]%s %s\n" "$C_RED$C_BOLD" "$C_RESET" "$msg" ;;
         esac
     done
     for f in "${FINDINGS[@]}"; do
-        IFS='|' read -r sev msg <<< "$f"
+        IFS='|' read -r sev _cat msg <<< "$f"
         case "$sev" in
             HIGH) ((n_high++)); printf "  %s[HIGH]%s     %s\n" "$C_RED" "$C_RESET" "$msg" ;;
         esac
     done
     for f in "${FINDINGS[@]}"; do
-        IFS='|' read -r sev msg <<< "$f"
+        IFS='|' read -r sev _cat msg <<< "$f"
         case "$sev" in
             MED)  ((n_med++));  printf "  %s[MEDIUM]%s   %s\n" "$C_YEL" "$C_RESET" "$msg" ;;
         esac
     done
     for f in "${FINDINGS[@]}"; do
-        IFS='|' read -r sev msg <<< "$f"
+        IFS='|' read -r sev _cat msg <<< "$f"
         case "$sev" in
             LOW)  ((n_low++));  printf "  %s[LOW]%s      %s\n" "$C_DIM" "$C_RESET" "$msg" ;;
         esac
@@ -1152,6 +1265,9 @@ discover_eyewitness_candidates() {
 # ---------------------------------------------------------------------------
 HAD_HIGH_OR_CRIT=false
 NOT_N8N_SEEN=false
+if [[ -n "$CSV_OUT_FILE" ]]; then
+    echo "target,severity,category,message" > "$CSV_OUT_FILE"
+fi
 if [[ -n "$EW_DIR" ]]; then
     [[ -d "$EW_DIR" ]] || { echo "Error: not a directory: $EW_DIR" >&2; exit 1; }
     CAND_FILE="$TMPDIR/ew_candidates.txt"
