@@ -209,6 +209,40 @@ except Exception:
     sys.exit()
 print("yes" if is_empty(data) else "no")
 '
+# Recent n8n releases stop disclosing versionCli in the unauthenticated
+# /rest/settings response, but the root page still ships a
+# <meta name="n8n:config:sentry" content="BASE64"> tag whose payload
+# decodes to JSON containing "release":"n8n@X.Y.Z" — this is the same
+# signal nuclei's n8n-panel template uses to fingerprint version when the
+# API field is absent.
+SENTRY_VERSION_EXTRACTOR='
+import base64, json, re, sys
+try:
+    with open(sys.argv[1], "r", errors="ignore") as f:
+        html = f.read()
+except Exception:
+    sys.exit()
+m = re.search(r"n8n:config:sentry\"\s+content=\"([^\"]+)\"", html)
+if not m:
+    sys.exit()
+raw = m.group(1)
+pad = "=" * (-len(raw) % 4)
+try:
+    payload = base64.b64decode(raw + pad).decode("utf-8", "ignore")
+    data = json.loads(payload)
+    rel = data.get("release", "") or ""
+    if rel.startswith("n8n@"):
+        print(rel[4:])
+    elif rel:
+        print(rel)
+except Exception:
+    pass
+'
+extract_sentry_version() {
+    # extract_sentry_version <root_body_file> -> prints version or nothing
+    [[ "$HAVE_PY" == true ]] || return 0
+    python3 -c "$SENTRY_VERSION_EXTRACTOR" "$1" 2>/dev/null
+}
 is_empty_body() {
     # is_empty_body <bodyfile> -> prints "yes" or "no"
     local f="$1"
@@ -242,7 +276,17 @@ scan_target() {
     local SETTINGS_JSON HEALTHZ_JSON WEBHOOK_STATUS
     SETTINGS_JSON=$($CURL "$TARGET/rest/settings" 2>/dev/null)
     HEALTHZ_JSON=$($CURL "$TARGET/healthz" 2>/dev/null)
-    WEBHOOK_STATUS=$($CURL -o /dev/null -w '%{http_code}' "$TARGET/webhook-test/" 2>/dev/null)
+    local WEBHOOK_BODY_FILE="$TMPDIR/webhook.body"
+    WEBHOOK_STATUS=$($CURL -o "$WEBHOOK_BODY_FILE" -w '%{http_code}' "$TARGET/webhook-test/" 2>/dev/null)
+    # n8n's SPA serves the app shell (index.html, HTTP 200) for any
+    # unmatched path — same catch-all behavior the endpoint-exposure
+    # table already guards against. Without this diff, "webhook-test
+    # live" would fire on every n8n instance regardless of whether a
+    # real webhook is actually registered there.
+    local WEBHOOK_LIVE=false
+    if [[ "$WEBHOOK_STATUS" =~ ^2 ]] && ! diff -q "$WEBHOOK_BODY_FILE" "$ROOT_BODY_FILE" >/dev/null 2>&1; then
+        WEBHOOK_LIVE=true
+    fi
     # n8n's unauthenticated /rest/settings payload has shrunk across
     # versions — newer releases omit `instanceId`, `versionCli`, `mfa`,
     # `telemetry`, and `oauthCallbackUrls` entirely from the anonymous
@@ -270,6 +314,11 @@ scan_target() {
     local MFA_ENABLED MFA_ENFORCED SAML_ON LDAP_ON OIDC_ON OIDC_LOGIN_URL OIDC_CB_URL
     local OAUTH1_CB OAUTH2_CB TELEMETRY_ON TELEMETRY_PROXY AUTHCOOKIE_SECURE HEALTH_STATUS
     VERSION=$(vget versionCli "unknown")
+    if [[ "$VERSION" == "unknown" ]]; then
+        local SENTRY_VERSION
+        SENTRY_VERSION=$(extract_sentry_version "$ROOT_BODY_FILE")
+        [[ -n "$SENTRY_VERSION" ]] && VERSION="$SENTRY_VERSION"
+    fi
     RELEASE_CHANNEL=$(vget releaseChannel "unknown")
     INSTANCE_ID=$(vget instanceId "unknown")
     SETTINGS_MODE=$(vget settingsMode "unknown")
@@ -289,11 +338,17 @@ scan_target() {
     TELEMETRY_PROXY=$(vget telemetry.config.proxy "")
     AUTHCOOKIE_SECURE=$(vget authCookie.secure "unknown")
     HEALTH_STATUS=$(jget "$HEALTHZ_JSON" "status" "unreachable")
+    # Only a genuine leak if the disclosed host differs from the host we
+    # actually scanned — an OIDC/OAuth callback almost always points back
+    # at the instance's own public domain, which isn't a disclosure at all.
+    local TARGET_HOST
+    TARGET_HOST=$(echo "$TARGET" | sed -E 's#^https?://##; s#/.*##' | tr '[:upper:]' '[:lower:]')
     local INTERNAL_HOST=""
     for u in "$OAUTH2_CB" "$OAUTH1_CB" "$OIDC_LOGIN_URL" "$OIDC_CB_URL"; do
         if [[ -n "$u" && "$u" != "null" ]]; then
             h=$(echo "$u" | sed -E 's#^https?://##; s#/.*##')
-            if [[ -n "$h" ]]; then INTERNAL_HOST="$h"; break; fi
+            hl=$(echo "$h" | tr '[:upper:]' '[:lower:]')
+            if [[ -n "$h" && "$hl" != "$TARGET_HOST" ]]; then INTERNAL_HOST="$h"; break; fi
         fi
     done
     # -------------------------------------------------------------------
@@ -428,14 +483,16 @@ scan_target() {
     # -------------------------------------------------------------------
     # Existing checks: webhook-test, credential test, nuclei
     # -------------------------------------------------------------------
-    if [[ "$WEBHOOK_STATUS" =~ ^2 ]]; then
-        FINDINGS+=("MED|Webhook test endpoint responded with HTTP $WEBHOOK_STATUS (may expose triggerable automations without authentication)")
+    if [[ "$WEBHOOK_LIVE" == true ]]; then
+        FINDINGS+=("MED|Webhook test endpoint responded with HTTP $WEBHOOK_STATUS and distinct content (may expose triggerable automations without authentication)")
     fi
     if [[ -n "$INTERNAL_HOST" ]]; then
         FINDINGS+=("LOW|Internal/real hostname disclosed via OAuth/OIDC callback URL: $INTERNAL_HOST")
     fi
-    if [[ "$MFA_ENFORCED" != "true" ]]; then
+    if [[ "$MFA_ENFORCED" == "false" ]]; then
         FINDINGS+=("HIGH|MFA not enforced org-wide (enabled=$MFA_ENABLED, enforced=$MFA_ENFORCED)")
+    elif [[ "$MFA_ENFORCED" != "true" ]]; then
+        FINDINGS+=("LOW|MFA posture could not be determined — mfa.* fields absent from /rest/settings on this n8n release (verify manually, e.g. during credentialed testing)")
     fi
     if [[ "$SHOW_SETUP" != "false" ]]; then
         FINDINGS+=("HIGH|Setup wizard may still be open (no owner account confirmed) — potential unauthenticated admin takeover")
@@ -643,8 +700,8 @@ EOF
         printf "%s│%s  %s✓ No internal hostname found in OAuth/OIDC callback URLs%s\n" "$C_CYN" "$C_RESET" "$C_GRN" "$C_RESET"
     fi
     kv "Telemetry enabled"    "$TELEMETRY_ON"
-    if [[ "$WEBHOOK_STATUS" =~ ^2 ]]; then
-        printf "%s│%s  %s⚠ Webhook test endpoint live (HTTP %s)%s\n" "$C_CYN" "$C_RESET" "$C_YEL" "$WEBHOOK_STATUS" "$C_RESET"
+    if [[ "$WEBHOOK_LIVE" == true ]]; then
+        printf "%s│%s  %s⚠ Webhook test endpoint live (HTTP %s, distinct content)%s\n" "$C_CYN" "$C_RESET" "$C_YEL" "$WEBHOOK_STATUS" "$C_RESET"
     else
         printf "%s│%s  %s✓ Webhook test path not live (HTTP %s)%s\n" "$C_CYN" "$C_RESET" "$C_GRN" "${WEBHOOK_STATUS:-n/a}" "$C_RESET"
     fi
