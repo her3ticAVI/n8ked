@@ -29,7 +29,6 @@
 # one Critical/High finding, 2 = target(s) not identifiable as n8n.
 #
 set -uo pipefail
-
 # ---------------------------------------------------------------------------
 # Args
 # ---------------------------------------------------------------------------
@@ -41,9 +40,7 @@ TEST_CRED=""
 RUN_NUCLEI=false
 NO_COLOR=false
 REVEAL_SECRETS=false
-
 print_help() { sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; }
-
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --file) TARGET_FILE="${2:-}"; shift 2 ;;
@@ -59,12 +56,10 @@ while [[ $# -gt 0 ]]; do
             shift ;;
     esac
 done
-
 if [[ -z "$TARGET" && -z "$TARGET_FILE" && -z "$EW_DIR" ]]; then
     print_help
     exit 1
 fi
-
 # ---------------------------------------------------------------------------
 # Colors
 # ---------------------------------------------------------------------------
@@ -76,7 +71,6 @@ else
     C_RESET=""; C_BOLD=""; C_DIM=""; C_RED=""; C_GRN=""; C_YEL=""
     C_MAG=""; C_CYN=""; C_WHT=""
 fi
-
 hr()      { printf "%s%s%s\n" "$C_DIM" "$(printf '─%.0s' $(seq 1 74))" "$C_RESET"; }
 section() { echo; printf "%s%s┌─ %s%s\n" "$C_BOLD" "$C_CYN" "$1" "$C_RESET"; }
 footer()  { printf "%s└──────────────────────────────────────────────────────────────────%s\n" "$C_CYN" "$C_RESET"; }
@@ -84,7 +78,6 @@ kv() {
     local key="$1" val="$2" color="${3:-$C_WHT}"
     printf "%s│%s  %-34s %s%s%s\n" "$C_CYN" "$C_RESET" "$key" "$color" "$val" "$C_RESET"
 }
-
 # ---------------------------------------------------------------------------
 # JSON helper — prefer jq, fall back to python3
 # ---------------------------------------------------------------------------
@@ -98,7 +91,6 @@ else
 fi
 HAVE_PY=false
 command -v python3 >/dev/null 2>&1 && HAVE_PY=true
-
 jget() {
     # jget <json> <dotted.path> [default]
     local json="$1" path="$2" default="${3:-}"
@@ -133,7 +125,6 @@ else:
     [[ -z "$val" ]] && val="$default"
     echo "$val"
 }
-
 json_escape() {
     if [[ "$HAVE_PY" == true ]]; then
         python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'
@@ -142,18 +133,15 @@ json_escape() {
         sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e ':a;N;$!ba;s/\n/\\n/g' | sed '1s/^/"/;$s/$/"/'
     fi
 }
-
-CURL="curl -sk --max-time 10"
+CURL="curl -skL --max-time 10"
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
-
 # ---------------------------------------------------------------------------
 # Secret scanning patterns (python3 only — most reliable regex engine we
 # can count on being present since it's also our JSON fallback)
 # ---------------------------------------------------------------------------
 SECRET_SCANNER='
 import re, sys
-
 PATTERNS = [
     ("AWS Access Key ID",        r"AKIA[0-9A-Z]{16}"),
     ("AWS Secret Access Key",    r"(?i)aws(.{0,20})?secret(.{0,20})?[\"\x27]?\s*[:=]\s*[\"\x27][0-9a-zA-Z/+]{40}[\"\x27]"),
@@ -168,14 +156,12 @@ PATTERNS = [
     ("Google API key",           r"AIza[0-9A-Za-z\-_]{35}"),
     ("GitHub token",             r"gh[pousr]_[A-Za-z0-9]{36,}"),
 ]
-
 def mask(v, reveal):
     if reveal:
         return v
     if len(v) <= 8:
         return v[0] + "****"
     return v[:4] + "..." + v[-4:]
-
 def main():
     path, label, reveal = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
     try:
@@ -192,10 +178,8 @@ def main():
                 continue
             seen.add(key)
             print(f"{name}|{label}|{mask(val, reveal)}")
-
 main()
 '
-
 secret_scan_file() {
     # secret_scan_file <bodyfile> <label>
     [[ "$HAVE_PY" == true ]] || return 0
@@ -203,12 +187,10 @@ secret_scan_file() {
     [[ "$REVEAL_SECRETS" == true ]] && reveal=1
     python3 -c "$SECRET_SCANNER" "$1" "$2" "$reveal" 2>/dev/null
 }
-
 # Recognizes n8n's common `{"data": [...]}` / `{"data": {}}` envelope as
 # empty when the inner payload has nothing in it, not just a bare [] or {}.
 EMPTY_CHECKER='
 import json, sys
-
 def is_empty(v):
     if v is None:
         return True
@@ -219,7 +201,6 @@ def is_empty(v):
             return is_empty(v.get("data"))
         return False
     return False
-
 try:
     with open(sys.argv[1], "r", errors="ignore") as f:
         data = json.load(f)
@@ -228,7 +209,6 @@ except Exception:
     sys.exit()
 print("yes" if is_empty(data) else "no")
 '
-
 is_empty_body() {
     # is_empty_body <bodyfile> -> prints "yes" or "no"
     local f="$1"
@@ -243,7 +223,6 @@ is_empty_body() {
         fi
     fi
 }
-
 # ---------------------------------------------------------------------------
 # Per-target scan
 # ---------------------------------------------------------------------------
@@ -254,32 +233,39 @@ scan_target() {
         TARGET="http://${TARGET}"
     fi
     TARGET="${TARGET%/}"
-
     local FINDINGS=()   # "SEV|message"
     local ROOT_HEADERS ROOT_STATUS SERVER_HDR ROOT_BODY_FILE
     ROOT_BODY_FILE="$TMPDIR/root.body"
     ROOT_HEADERS=$($CURL -D - -o "$ROOT_BODY_FILE" "$TARGET/" 2>/dev/null)
     ROOT_STATUS=$(echo "$ROOT_HEADERS" | head -1 | tr -d '\r')
     SERVER_HDR=$(echo "$ROOT_HEADERS" | grep -i '^server:' | head -1 | cut -d' ' -f2- | tr -d '\r')
-
     local SETTINGS_JSON HEALTHZ_JSON WEBHOOK_STATUS
     SETTINGS_JSON=$($CURL "$TARGET/rest/settings" 2>/dev/null)
     HEALTHZ_JSON=$($CURL "$TARGET/healthz" 2>/dev/null)
     WEBHOOK_STATUS=$($CURL -o /dev/null -w '%{http_code}' "$TARGET/webhook-test/" 2>/dev/null)
-
-    if ! echo "$SETTINGS_JSON" | grep -q '"instanceId"'; then
+    # n8n's unauthenticated /rest/settings payload has shrunk across
+    # versions — newer releases omit `instanceId`, `versionCli`, `mfa`,
+    # `telemetry`, and `oauthCallbackUrls` entirely from the anonymous
+    # response. Gate detection on ANY of several fields that have shown
+    # up across versions rather than one field that some versions no
+    # longer send, and fall back to n8n's root-page config meta tags
+    # (e.g. <meta name="n8n:config:rest-endpoint" ...>, prefix-matched
+    # since the real tag name is never a bare "n8n:config").
+    local ROOT_HAS_META=false
+    if grep -q 'name="n8n:config' "$ROOT_BODY_FILE" 2>/dev/null; then
+        ROOT_HAS_META=true
+    fi
+    if ! echo "$SETTINGS_JSON" | grep -qE '"instanceId"|"settingsMode"|"userManagement"' && [[ "$ROOT_HAS_META" == false ]]; then
         if [[ "$JSON_OUT" == true ]]; then
-            echo "{\"target\":\"$TARGET\",\"error\":\"not an n8n instance (no instanceId in /rest/settings)\"}"
+            echo "{\"target\":\"$TARGET\",\"error\":\"not an n8n instance (no instanceId/settingsMode/userManagement in /rest/settings, no n8n:config meta tag on root page)\"}"
         else
             echo
-            echo "${C_RED}✗ ${TARGET} does not look like an n8n instance (no instanceId in /rest/settings response).${C_RESET}"
+            echo "${C_RED}✗ ${TARGET} does not look like an n8n instance (no instanceId/settingsMode/userManagement in /rest/settings, no n8n:config meta tag on root page).${C_RESET}"
         fi
         NOT_N8N_SEEN=true
         return
     fi
-
     vget() { jget "$SETTINGS_JSON" "data.$1" "${2:-}"; }
-
     local VERSION RELEASE_CHANNEL INSTANCE_ID SETTINGS_MODE AUTH_METHOD SHOW_SETUP SMTP_SETUP
     local MFA_ENABLED MFA_ENFORCED SAML_ON LDAP_ON OIDC_ON OIDC_LOGIN_URL OIDC_CB_URL
     local OAUTH1_CB OAUTH2_CB TELEMETRY_ON TELEMETRY_PROXY AUTHCOOKIE_SECURE HEALTH_STATUS
@@ -303,7 +289,6 @@ scan_target() {
     TELEMETRY_PROXY=$(vget telemetry.config.proxy "")
     AUTHCOOKIE_SECURE=$(vget authCookie.secure "unknown")
     HEALTH_STATUS=$(jget "$HEALTHZ_JSON" "status" "unreachable")
-
     local INTERNAL_HOST=""
     for u in "$OAUTH2_CB" "$OAUTH1_CB" "$OIDC_LOGIN_URL" "$OIDC_CB_URL"; do
         if [[ -n "$u" && "$u" != "null" ]]; then
@@ -311,7 +296,6 @@ scan_target() {
             if [[ -n "$h" ]]; then INTERNAL_HOST="$h"; break; fi
         fi
     done
-
     # -------------------------------------------------------------------
     # Access control: unauthenticated REST/API endpoint exposure
     # -------------------------------------------------------------------
@@ -329,7 +313,6 @@ scan_target() {
     )
     local EXPOSED_BODIES=()   # "file|label"
     local ENDPOINT_RESULTS=() # "path|label|verdict|status"
-
     for entry in "${ENDPOINTS[@]}"; do
         IFS='|' read -r ep label sev <<< "$entry"
         local bodyfile="$TMPDIR/ep_$(echo "$ep" | tr '/?&=' '____').body"
@@ -338,7 +321,6 @@ scan_target() {
         local body
         body=$(cat "$bodyfile" 2>/dev/null)
         local verdict="PROTECTED"
-
         if [[ "$status" == "401" || "$status" == "403" ]]; then
             verdict="PROTECTED"
         elif [[ "$status" == "404" ]]; then
@@ -359,13 +341,11 @@ scan_target() {
         else
             verdict="OTHER($status)"
         fi
-
         ENDPOINT_RESULTS+=("$ep|$label|$verdict|$status")
         if [[ "$verdict" == "EXPOSED" ]]; then
             FINDINGS+=("$sev|Unauthenticated access to $ep ($label) — HTTP $status returned real data with no auth required")
         fi
     done
-
     # -------------------------------------------------------------------
     # Secret scan across everything that came back exposed (plus settings)
     # -------------------------------------------------------------------
@@ -384,7 +364,6 @@ scan_target() {
         IFS='|' read -r stype slabel sval <<< "$hit"
         FINDINGS+=("CRIT|Hardcoded secret found — $stype in $slabel: $sval")
     done
-
     # -------------------------------------------------------------------
     # Security headers
     # -------------------------------------------------------------------
@@ -395,7 +374,15 @@ scan_target() {
     echo "$ROOT_HEADERS" | grep -qi '^content-security-policy:' && HAS_CSP=true
     local IS_HTTPS=false
     [[ "$TARGET" == https://* ]] && IS_HTTPS=true
-
+    # If we followed a redirect (e.g. Cloudflare forcing HTTPS) the
+    # headers/body above already reflect the final scheme even though
+    # $TARGET may still read "http://" — check the headers we actually
+    # got back for a Location: https:// hop, or the effective final
+    # status line, so the TLS finding doesn't misreport a host that in
+    # fact only serves HTTPS.
+    if [[ "$IS_HTTPS" == false ]] && echo "$ROOT_HEADERS" | grep -qi '^location: https://'; then
+        IS_HTTPS=true
+    fi
     if [[ "$IS_HTTPS" == false ]]; then
         FINDINGS+=("MED|Service reachable over plain HTTP (no TLS) at $TARGET")
     elif [[ "$HAS_HSTS" == false ]]; then
@@ -404,7 +391,6 @@ scan_target() {
     [[ "$HAS_XFO" == false ]] && FINDINGS+=("LOW|X-Frame-Options header missing (clickjacking hardening)")
     [[ "$HAS_XCTO" == false ]] && FINDINGS+=("LOW|X-Content-Type-Options header missing")
     [[ "$HAS_CSP" == false ]] && FINDINGS+=("LOW|Content-Security-Policy header missing")
-
     # -------------------------------------------------------------------
     # CORS check
     # -------------------------------------------------------------------
@@ -425,7 +411,6 @@ scan_target() {
             FINDINGS+=("LOW|CORS Access-Control-Allow-Origin: * (no credentials observed)")
         fi
     fi
-
     # -------------------------------------------------------------------
     # Common accidentally-exposed files
     # -------------------------------------------------------------------
@@ -440,7 +425,6 @@ scan_target() {
             FINDINGS+=("MED|Possible file exposure at $p (HTTP 200, distinct content — verify manually)")
         fi
     done
-
     # -------------------------------------------------------------------
     # Existing checks: webhook-test, credential test, nuclei
     # -------------------------------------------------------------------
@@ -456,7 +440,6 @@ scan_target() {
     if [[ "$SHOW_SETUP" != "false" ]]; then
         FINDINGS+=("HIGH|Setup wizard may still be open (no owner account confirmed) — potential unauthenticated admin takeover")
     fi
-
     local CRED_RESULT=""
     if [[ -n "$TEST_CRED" ]]; then
         local CU="${TEST_CRED%%:*}" CP="${TEST_CRED#*:}"
@@ -472,7 +455,6 @@ scan_target() {
             CRED_RESULT="unknown"
         fi
     fi
-
     local NUCLEI_OUT=""
     if [[ "$RUN_NUCLEI" == true ]]; then
         if command -v nuclei >/dev/null 2>&1; then
@@ -481,7 +463,6 @@ scan_target() {
             NUCLEI_OUT="nuclei not installed — skipped"
         fi
     fi
-
     # Fold nuclei's CVE matches into the risk summary as ONE rolled-up
     # "Unpatched software" finding rather than one line per CVE — multiple
     # matchers on the same template (e.g. "CVE-2026-21858:status-2",
@@ -540,7 +521,6 @@ scan_target() {
             fi
         fi
     fi
-
     # -------------------------------------------------------------------
     # Output
     # -------------------------------------------------------------------
@@ -582,7 +562,6 @@ print(json.dumps(out))
 EOF
         return
     fi
-
     echo
     printf "%s%s  _   _  __ _              %s\n" "$C_BOLD" "$C_MAG" "$C_RESET"
     printf "%s%s | \\ | |/ _\` |___  _____  __| %s\n" "$C_BOLD" "$C_MAG" "$C_RESET"
@@ -591,7 +570,6 @@ EOF
     hr
     printf "%sTarget:%s %s    %sChecked:%s %s\n" "$C_BOLD" "$C_RESET" "$TARGET" "$C_BOLD" "$C_RESET" "$(date '+%Y-%m-%d %H:%M:%S %Z')"
     hr
-
     section "Instance Fingerprint"
     kv "HTTP root status"     "$ROOT_STATUS"
     kv "Server header"        "${SERVER_HDR:-none disclosed}"
@@ -600,7 +578,6 @@ EOF
     kv "Instance ID"          "$INSTANCE_ID" "$C_DIM"
     kv "/healthz"             "$HEALTH_STATUS"
     footer
-
     section "Authentication & SSO"
     kv "Auth method"          "$AUTH_METHOD"
     kv "Setup already done"   "$( [[ "$SHOW_SETUP" == "false" ]] && echo "yes (admin exists)" || echo "NO — first-run setup may be open" )" \
@@ -612,7 +589,6 @@ EOF
     kv "OIDC SSO"             "$OIDC_ON"
     kv "Auth cookie 'secure'" "$AUTHCOOKIE_SECURE"
     footer
-
     section "Access Control — Unauthenticated Endpoint Exposure"
     printf "%s│%s  %-3s %-30s %-6s %-26s %s\n" "$C_CYN" "$C_RESET" "" "STATUS" "[CODE]" "ENDPOINT" "DESCRIPTION"
     for e in "${ENDPOINT_RESULTS[@]}"; do
@@ -636,7 +612,6 @@ EOF
         esac
     done
     footer
-
     if [[ ${#SECRET_HITS[@]} -gt 0 ]]; then
         section "Secret Scan"
         for hit in "${SECRET_HITS[@]}"; do
@@ -646,7 +621,6 @@ EOF
         [[ "$REVEAL_SECRETS" == false ]] && printf "%s│%s  %s(values masked — rerun with --reveal-secrets to see full values)%s\n" "$C_CYN" "$C_RESET" "$C_DIM" "$C_RESET"
         footer
     fi
-
     section "Security Headers & Transport"
     kv "TLS"                  "$( [[ "$IS_HTTPS" == true ]] && echo "https" || echo "plain HTTP" )" "$( [[ "$IS_HTTPS" == true ]] && echo "$C_GRN" || echo "$C_RED" )"
     kv "Strict-Transport-Security" "$HAS_HSTS"
@@ -655,7 +629,6 @@ EOF
     kv "Content-Security-Policy" "$HAS_CSP"
     kv "CORS (probe origin)"  "$CORS_VERDICT"
     footer
-
     if [[ ${#EXPOSED_FILES[@]} -gt 0 ]]; then
         section "Possible Config/File Exposure"
         for p in "${EXPOSED_FILES[@]}"; do
@@ -663,7 +636,6 @@ EOF
         done
         footer
     fi
-
     section "Other Disclosure"
     if [[ -n "$INTERNAL_HOST" ]]; then
         printf "%s│%s  %s⚠ Internal hostname disclosed:%s %s\n" "$C_CYN" "$C_RESET" "$C_YEL" "$C_RESET" "$INTERNAL_HOST"
@@ -677,7 +649,6 @@ EOF
         printf "%s│%s  %s✓ Webhook test path not live (HTTP %s)%s\n" "$C_CYN" "$C_RESET" "$C_GRN" "${WEBHOOK_STATUS:-n/a}" "$C_RESET"
     fi
     footer
-
     if [[ -n "$TEST_CRED" ]]; then
         section "Credential Test"
         kv "Tested" "${TEST_CRED%%:*}"
@@ -688,7 +659,6 @@ EOF
         esac
         footer
     fi
-
     if [[ "$RUN_NUCLEI" == true ]]; then
         section "nuclei (tag: n8n)"
         if [[ -z "$NUCLEI_OUT" ]]; then
@@ -703,7 +673,6 @@ EOF
         echo
         printf "%s(known-CVE check skipped — rerun with --nuclei to check the detected version against nuclei's n8n-tagged CVE templates)%s\n" "$C_DIM" "$C_RESET"
     fi
-
     # -------------------------------------------------------------------
     # Risk summary
     # -------------------------------------------------------------------
@@ -740,12 +709,10 @@ EOF
     echo
     printf "%s%d critical, %d high, %d medium, %d low%s\n" "$C_BOLD" "$n_crit" "$n_high" "$n_med" "$n_low" "$C_RESET"
     echo
-
     if [[ $((n_crit + n_high)) -gt 0 ]]; then
         HAD_HIGH_OR_CRIT=true
     fi
 }
-
 # ---------------------------------------------------------------------------
 # EyeWitness folder discovery — pulls every URL EyeWitness saw
 # (open_ports.csv rows, plus any href="http(s)://..." in report*.html) and
@@ -755,10 +722,8 @@ EOF
 # ---------------------------------------------------------------------------
 EW_PYTHON_EXTRACTOR='
 import csv, glob, os, re, sys
-
 d = sys.argv[1]
 origins = set()
-
 csv_path = os.path.join(d, "open_ports.csv")
 if os.path.isfile(csv_path):
     with open(csv_path, newline="", errors="ignore") as f:
@@ -770,7 +735,6 @@ if os.path.isfile(csv_path):
         m = re.match(r"^(https?://[^/]+)", url)
         if m:
             origins.add(m.group(1))
-
 for path in glob.glob(os.path.join(d, "report*.html")):
     try:
         with open(path, "r", errors="ignore") as f:
@@ -779,11 +743,9 @@ for path in glob.glob(os.path.join(d, "report*.html")):
         continue
     for m in re.finditer(r"href=\"(https?://[^\"/]+)[^\"]*\"", html):
         origins.add(m.group(1))
-
 for o in sorted(origins):
     print(o)
 '
-
 discover_eyewitness_candidates() {
     # discover_eyewitness_candidates <dir> -> writes unique origins to stdout
     local dir="$1"
@@ -797,31 +759,27 @@ discover_eyewitness_candidates() {
         fi
     fi | sort -u
 }
-
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 HAD_HIGH_OR_CRIT=false
 NOT_N8N_SEEN=false
-
 if [[ -n "$EW_DIR" ]]; then
     [[ -d "$EW_DIR" ]] || { echo "Error: not a directory: $EW_DIR" >&2; exit 1; }
     CAND_FILE="$TMPDIR/ew_candidates.txt"
     discover_eyewitness_candidates "$EW_DIR" > "$CAND_FILE"
     TOTAL_CAND=$(wc -l < "$CAND_FILE" | tr -d ' ')
     echo "[n8ked] Parsed EyeWitness data: $TOTAL_CAND candidate host(s). Probing for n8n..." >&2
-
     FOUND=0
     while IFS= read -r origin; do
         [[ -z "$origin" ]] && continue
-        probe=$(curl -sk --max-time 6 "$origin/rest/settings" 2>/dev/null)
-        if echo "$probe" | grep -q '"instanceId"'; then
+        probe=$(curl -skL --max-time 6 "$origin/rest/settings" 2>/dev/null)
+        if echo "$probe" | grep -qE '"instanceId"|"settingsMode"|"userManagement"'; then
             FOUND=$((FOUND + 1))
             echo "[n8ked]   -> n8n confirmed: $origin" >&2
             scan_target "$origin"
         fi
     done < "$CAND_FILE"
-
     echo "[n8ked] Done. $FOUND n8n instance(s) found out of $TOTAL_CAND candidate(s)." >&2
     if [[ "$FOUND" -eq 0 ]]; then
         NOT_N8N_SEEN=true
@@ -836,7 +794,6 @@ elif [[ -n "$TARGET_FILE" ]]; then
 else
     scan_target "$TARGET"
 fi
-
 if [[ "$HAD_HIGH_OR_CRIT" == true ]]; then
     exit 1
 elif [[ "$NOT_N8N_SEEN" == true ]]; then
