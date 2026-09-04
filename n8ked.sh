@@ -141,65 +141,12 @@ else
     C_RESET=""; C_BOLD=""; C_DIM=""; C_RED=""; C_GRN=""; C_YEL=""
     C_MAG=""; C_CYN=""; C_WHT=""
 fi
-# ---------------------------------------------------------------------------
-# Display helpers (report width, borders, wrapping)
-# ---------------------------------------------------------------------------
-REPORT_WIDTH=78
-BORDER_W=$((REPORT_WIDTH - 2))
-hr()      { printf "%s%s%s\n" "$C_DIM" "$(printf '─%.0s' $(seq 1 $REPORT_WIDTH))" "$C_RESET"; }
-dhr()     { printf "%s%s%s\n" "$C_DIM" "$(printf '═%.0s' $(seq 1 $REPORT_WIDTH))" "$C_RESET"; }
-section() { echo; printf "%s%s── %s %s%s\n" "$C_BOLD" "$C_CYN" "$1" "$(printf -- '─%.0s' $(seq 1 $((REPORT_WIDTH - 5 - ${#1}))))" "$C_RESET"; }
-footer()  { echo; }
-# row_wrap <indent> <label> <text> -> word-wraps <text> to fit the report
-# width, printing <label> (dimmed) on the first line only, with any
-# continuation lines aligned underneath it. Also breaks up unbroken long
-# tokens (long URLs/JWTs/hashes) first so `fold -s` always has somewhere
-# to wrap instead of overrunning the line.
-row_wrap() {
-    local indent="$1" label="$2" text="$3"
-    local width=$((REPORT_WIDTH - ${#indent} - ${#label}))
-    [[ $width -lt 20 ]] && width=20
-    local pad; pad=$(printf '%*s' "${#label}" "")
-    # Only inject break points INSIDE individual words that are themselves
-    # longer than the wrap width (long URLs, JWTs, hashes) — never touch
-    # ordinary words, or normal text ends up broken mid-word for no reason.
-    local safe_text
-    safe_text=$(awk -v w="$width" '{
-        out = ""
-        for (i = 1; i <= NF; i++) {
-            word = $i
-            while (length(word) > w) {
-                out = out substr(word, 1, w) " "
-                word = substr(word, w + 1)
-            }
-            out = out word " "
-        }
-        print out
-    }' <<< "$text")
-    local first=true
-    fold -s -w "$width" <<< "$safe_text" | while IFS= read -r wline; do
-        if [[ "$first" == true ]]; then
-            printf "%s%s%s%s%s\n" "$indent" "$C_DIM" "$label" "$C_RESET" "$wline"
-            first=false
-        else
-            printf "%s%s%s\n" "$indent" "$pad" "$wline"
-        fi
-    done
-}
-# Back-compat alias — same helper, name kept for existing call sites.
-wrap_flat() { row_wrap "$@"; }
+hr()      { printf "%s%s%s\n" "$C_DIM" "$(printf '─%.0s' $(seq 1 74))" "$C_RESET"; }
+section() { echo; printf "%s%s┌─ %s%s\n" "$C_BOLD" "$C_CYN" "$1" "$C_RESET"; }
+footer()  { printf "%s└──────────────────────────────────────────────────────────────────%s\n" "$C_CYN" "$C_RESET"; }
 kv() {
-    # kv <key> <val> [color] — label column is a fixed width; the value
-    # wraps onto continuation lines (via row_wrap) instead of overrunning
-    # when it's long, so long values never break the row's alignment.
     local key="$1" val="$2" color="${3:-$C_WHT}"
-    local label; label=$(printf "  %-32s " "$key")
-    row_wrap "" "$label" "${color}${val}${C_RESET}"
-}
-bullet() {
-    # bullet <glyph> <color> <text> — a single wrapped, glyph-prefixed line
-    local glyph="$1" color="$2" text="$3"
-    row_wrap "  " "${color}${glyph} ${C_RESET}" "$text"
+    printf "%s│%s  %-34s %s%s%s\n" "$C_CYN" "$C_RESET" "$key" "$color" "$val" "$C_RESET"
 }
 # ---------------------------------------------------------------------------
 # JSON helper — prefer jq, fall back to python3
@@ -487,6 +434,24 @@ cve_src_label() {
         version) echo "version range — NOT actively confirmed, verify manually" ;;
         *)       echo "$1" ;;
     esac
+}
+wrap_flat() {
+    # wrap_flat <indent> <label> <text> -> word-wraps <text> to fit the
+    # report width, no box border — used for flat (non-boxed) sections
+    # like findings/PoC output where content length is unpredictable and
+    # a fixed-width box can't close around it cleanly. <label> (dimmed)
+    # appears on the first line only; continuation lines align under it.
+    local indent="$1" label="$2" text="$3"
+    local pad; pad=$(printf '%*s' "${#label}" "")
+    local first=true
+    fold -s -w "$((74 - ${#indent} - ${#label}))" <<< "$text" | while IFS= read -r wline; do
+        if [[ "$first" == true ]]; then
+            printf "%s%s%s%s%s\n" "$indent" "$C_DIM" "$label" "$C_RESET" "$wline"
+            first=false
+        else
+            printf "%s%s%s\n" "$indent" "$pad" "$wline"
+        fi
+    done
 }
 # Each CVE is one or more rows (n8n sometimes has multiple disjoint
 # vulnerable ranges across release branches for the same advisory);
@@ -1297,10 +1262,13 @@ if csv_path:
         [[ "$JSON_OUT" == true ]] && return
     fi
     echo
-    printf "%s%sn8ked%s  %s│%s  n8n exposure & misconfiguration auditor\n" "$C_BOLD" "$C_MAG" "$C_RESET" "$C_DIM" "$C_RESET"
+    printf "%s%s /░ /░    /█▀▀█    /░/░    /█▀▀▀/    /░░░ %s\n" "$C_BOLD" "$C_MAG" "$C_RESET"
+    printf "%s%s│ ▒▒ ▒   │ ▓▓▓▓   │ ▒▒/   │ ▓▓▓     │-▒_/▒%s\n" "$C_BOLD" "$C_MAG" "$C_RESET"
+    printf "%s%s│ ▓│▓▓   │ ▒ /▒   │ ▓▓    │_▒_/     │ ▓│ ▓  n8ked — n8n exposure auditor%s\n" "$C_BOLD" "$C_MAG" "$C_RESET"
+    printf "%s%s│ █│ █   │ ░░░░   │ █ █   │ ░░░░    │ ███/%s\n" "$C_BOLD" "$C_MAG" "$C_RESET"
+    printf "%s%s│//│//   │/___/   │////   │/___/    │/__/ %s\n" "$C_BOLD" "$C_MAG" "$C_RESET"
     hr
-    printf "%sTarget%s   %s\n" "$C_BOLD" "$C_RESET" "$TARGET"
-    printf "%sChecked%s  %s\n" "$C_BOLD" "$C_RESET" "$(date '+%Y-%m-%d %H:%M:%S %Z')"
+    printf "%sTarget:%s %s    %sChecked:%s %s\n" "$C_BOLD" "$C_RESET" "$TARGET" "$C_BOLD" "$C_RESET" "$(date '+%Y-%m-%d %H:%M:%S %Z')"
     # ---------------------------------------------------------------
     # Scorecard — every check has already run and FINDINGS is fully
     # populated by this point, so the severity tally can be shown right
@@ -1316,7 +1284,7 @@ if csv_path:
             LOW)  ((sc_low++))  ;;
         esac
     done
-    dhr
+    printf "%s%s%s\n" "$C_DIM" "$(printf '═%.0s' $(seq 1 74))" "$C_RESET"
     if [[ $((sc_crit + sc_high)) -gt 0 ]]; then
         printf "  %s%sCRITICAL %d%s   %sHIGH %d%s   %sMEDIUM %d%s   %sLOW %d%s\n" \
             "$C_BOLD" "$C_RED" "$sc_crit" "$C_RESET" \
@@ -1329,7 +1297,7 @@ if csv_path:
             "$C_YEL" "$sc_med" "$C_RESET" \
             "$C_DIM" "$sc_low" "$C_RESET"
     fi
-    dhr
+    printf "%s%s%s\n" "$C_DIM" "$(printf '═%.0s' $(seq 1 74))" "$C_RESET"
     section "Instance Fingerprint"
     kv "HTTP root status"     "$ROOT_STATUS"
     kv "Server header"        "${SERVER_HDR:-none disclosed}"
@@ -1337,6 +1305,7 @@ if csv_path:
     kv "Release channel"      "$RELEASE_CHANNEL"
     kv "Instance ID"          "$INSTANCE_ID" "$C_DIM"
     kv "/healthz"             "$HEALTH_STATUS"
+    footer
     section "Authentication & SSO"
     kv "Auth method"          "$AUTH_METHOD"
     kv "Setup already done"   "$( [[ "$SHOW_SETUP" == "false" ]] && echo "yes (admin exists)" || echo "NO — first-run setup may be open" )" \
@@ -1347,31 +1316,45 @@ if csv_path:
     kv "LDAP"                 "$LDAP_ON"
     kv "OIDC SSO"             "$OIDC_ON"
     kv "Auth cookie 'secure'" "$AUTHCOOKIE_SECURE"
+    footer
     section "Access Control — Unauthenticated Endpoint Exposure"
+    printf "%s│%s  %-3s %-30s %-6s %-26s %s\n" "$C_CYN" "$C_RESET" "" "STATUS" "[CODE]" "ENDPOINT" "DESCRIPTION"
     for e in "${ENDPOINT_RESULTS[@]}"; do
         IFS='|' read -r ep label verdict status <<< "$e"
-        local ep_line="[$status] $ep — $label"
         case "$verdict" in
-            EXPOSED)     bullet "✗" "$C_RED" "ACCESSIBLE WITHOUT AUTH   $ep_line" ;;
-            PROTECTED)   bullet "✓" "$C_GRN" "Protected, auth required  $ep_line" ;;
-            EMPTY)       bullet "✓" "$C_WHT" "Reachable, no data        $ep_line" ;;
-            NOT-ENABLED) bullet "-" "$C_DIM" "Not enabled               $ep_line" ;;
-            *)           bullet "?" "$C_YEL" "Unknown — review manually $ep_line" ;;
+            EXPOSED)
+                printf "%s│%s  %s✗%s  %s%-30s%s %-6s %-26s %s(%s)%s\n" \
+                    "$C_CYN" "$C_RESET" "$C_RED" "$C_RESET" "$C_RED" "ACCESSIBLE WITHOUT AUTH" "$C_RESET" "[$status]" "$ep" "$C_DIM" "$label" "$C_RESET" ;;
+            PROTECTED)
+                printf "%s│%s  %s✓%s  %s%-30s%s %-6s %-26s %s(%s)%s\n" \
+                    "$C_CYN" "$C_RESET" "$C_GRN" "$C_RESET" "$C_GRN" "PROTECTED — AUTH REQUIRED" "$C_RESET" "[$status]" "$ep" "$C_DIM" "$label" "$C_RESET" ;;
+            EMPTY)
+                printf "%s│%s  %s✓%s  %s%-30s%s %-6s %-26s %s(%s)%s\n" \
+                    "$C_CYN" "$C_RESET" "$C_GRN" "$C_RESET" "$C_WHT" "REACHABLE, NO DATA RETURNED" "$C_RESET" "[$status]" "$ep" "$C_DIM" "$label" "$C_RESET" ;;
+            NOT-ENABLED)
+                printf "%s│%s  %s-%s  %s%-30s%s %-6s %-26s %s(%s)%s\n" \
+                    "$C_CYN" "$C_RESET" "$C_DIM" "$C_RESET" "$C_DIM" "NOT ENABLED" "$C_RESET" "[$status]" "$ep" "$C_DIM" "$label" "$C_RESET" ;;
+            *)
+                printf "%s│%s  %s?%s  %s%-30s%s %-6s %-26s %s(%s)%s\n" \
+                    "$C_CYN" "$C_RESET" "$C_YEL" "$C_RESET" "$C_YEL" "UNKNOWN — REVIEW MANUALLY" "$C_RESET" "[$status]" "$ep" "$C_DIM" "$label" "$C_RESET" ;;
         esac
     done
+    footer
     if [[ ${#SECRET_HITS[@]} -gt 0 ]]; then
         section "Secret Scan"
         for hit in "${SECRET_HITS[@]}"; do
             IFS='|' read -r stype slabel sval <<< "$hit"
-            bullet "✗" "$C_RED" "${stype} in ${slabel}: ${C_BOLD}${sval}${C_RESET}"
+            printf "%s│%s  %s✗ %s%s in %s: %s%s%s\n" "$C_CYN" "$C_RESET" "$C_RED" "$stype" "$C_RESET" "$slabel" "$C_BOLD" "$sval" "$C_RESET"
         done
-        [[ "$REVEAL_SECRETS" == false ]] && printf "  %s(values masked — rerun with --reveal-secrets to see full values)%s\n" "$C_DIM" "$C_RESET"
+        [[ "$REVEAL_SECRETS" == false ]] && printf "%s│%s  %s(values masked — rerun with --reveal-secrets to see full values)%s\n" "$C_CYN" "$C_RESET" "$C_DIM" "$C_RESET"
+        footer
     fi
     if [[ ${#DISCLOSURE_HDRS[@]} -gt 0 ]]; then
         section "Header Disclosure"
         for h in "${DISCLOSURE_HDRS[@]}"; do
-            bullet "⚠" "$C_YEL" "$h"
+            printf "%s│%s  %s⚠ %s%s\n" "$C_CYN" "$C_RESET" "$C_YEL" "$h" "$C_RESET"
         done
+        footer
     fi
     section "Security Headers & Transport"
     kv "TLS"                  "$( [[ "$IS_HTTPS" == true ]] && echo "https" || echo "plain HTTP" )" "$( [[ "$IS_HTTPS" == true ]] && echo "$C_GRN" || echo "$C_RED" )"
@@ -1380,80 +1363,87 @@ if csv_path:
     kv "X-Content-Type-Options" "$HAS_XCTO"
     kv "Content-Security-Policy" "$HAS_CSP"
     kv "CORS (probe origin)"  "$CORS_VERDICT"
+    footer
     if [[ ${#EXPOSED_FILES[@]} -gt 0 ]]; then
         section "Possible Config/File Exposure"
         for p in "${EXPOSED_FILES[@]}"; do
-            bullet "⚠" "$C_YEL" "$p returned distinct HTTP 200 content — verify manually"
+            printf "%s│%s  %s⚠ %s%s returned distinct HTTP 200 content — verify manually\n" "$C_CYN" "$C_RESET" "$C_YEL" "$p" "$C_RESET"
         done
+        footer
     fi
     section "Other Disclosure"
     if [[ -n "$INTERNAL_HOST" ]]; then
-        bullet "⚠" "$C_YEL" "Internal hostname disclosed: $INTERNAL_HOST"
+        printf "%s│%s  %s⚠ Internal hostname disclosed:%s %s\n" "$C_CYN" "$C_RESET" "$C_YEL" "$C_RESET" "$INTERNAL_HOST"
     else
-        bullet "✓" "$C_GRN" "No internal hostname found in OAuth/OIDC callback URLs"
+        printf "%s│%s  %s✓ No internal hostname found in OAuth/OIDC callback URLs%s\n" "$C_CYN" "$C_RESET" "$C_GRN" "$C_RESET"
     fi
     kv "Telemetry enabled"    "$TELEMETRY_ON"
     if [[ "$WEBHOOK_LIVE" == true ]]; then
-        bullet "⚠" "$C_YEL" "Webhook test endpoint live (HTTP $WEBHOOK_STATUS, distinct content)"
+        printf "%s│%s  %s⚠ Webhook test endpoint live (HTTP %s, distinct content)%s\n" "$C_CYN" "$C_RESET" "$C_YEL" "$WEBHOOK_STATUS" "$C_RESET"
     else
-        bullet "✓" "$C_GRN" "Webhook test path not live (HTTP ${WEBHOOK_STATUS:-n/a})"
+        printf "%s│%s  %s✓ Webhook test path not live (HTTP %s)%s\n" "$C_CYN" "$C_RESET" "$C_GRN" "${WEBHOOK_STATUS:-n/a}" "$C_RESET"
     fi
     if [[ "$WEBHOOK_PROD_LIVE" == true ]]; then
-        bullet "⚠" "$C_RED" "PRODUCTION webhook base (/webhook/) live (HTTP $WEBHOOK_PROD_STATUS, distinct content)"
+        printf "%s│%s  %s⚠ PRODUCTION webhook base (/webhook/) live (HTTP %s, distinct content)%s\n" "$C_CYN" "$C_RESET" "$C_RED" "$WEBHOOK_PROD_STATUS" "$C_RESET"
     else
-        bullet "✓" "$C_GRN" "Production webhook base not live (HTTP ${WEBHOOK_PROD_STATUS:-n/a})"
+        printf "%s│%s  %s✓ Production webhook base not live (HTTP %s)%s\n" "$C_CYN" "$C_RESET" "$C_GRN" "${WEBHOOK_PROD_STATUS:-n/a}" "$C_RESET"
     fi
+    footer
     if [[ -n "$TEST_CRED" || -n "$USERPASS_FILE" || "$CHECK_LOCKOUT" == true ]]; then
         section "Credential Testing"
         if [[ -n "$TEST_CRED" ]]; then
             kv "Single cred tested" "${TEST_CRED%%:*}"
             case "$CRED_RESULT" in
-                success) bullet "✗" "$C_RED" "Login SUCCEEDED — valid credentials" ;;
-                fail)    bullet "✓" "$C_GRN" "Login rejected (401)" ;;
-                *)       bullet "⚠" "$C_YEL" "Unexpected response — review manually" ;;
+                success) printf "%s│%s  %s✗ Login SUCCEEDED — valid credentials%s\n" "$C_CYN" "$C_RESET" "$C_RED" "$C_RESET" ;;
+                fail)    printf "%s│%s  %s✓ Login rejected (401)%s\n" "$C_CYN" "$C_RESET" "$C_GRN" "$C_RESET" ;;
+                *)       printf "%s│%s  %s⚠ Unexpected response — review manually%s\n" "$C_CYN" "$C_RESET" "$C_YEL" "$C_RESET" ;;
             esac
         fi
         if [[ -n "$USERPASS_FILE" ]]; then
             kv "Brute force" "$BRUTE_TRIED/$BRUTE_TOTAL pair(s) tried, ${#BRUTE_VALID[@]} valid"
             for v in "${BRUTE_VALID[@]}"; do
-                bullet "✗" "$C_RED" "VALID: ${v%%:*}"
+                printf "%s│%s  %s✗ VALID: %s%s\n" "$C_CYN" "$C_RESET" "$C_RED" "${v%%:*}" "$C_RESET"
             done
         fi
         if [[ "$CHECK_LOCKOUT" == true ]]; then
             case "$LOCKOUT_RESULT" in
-                throttled)     bullet "✓" "$C_GRN" "/rest/login throttled (HTTP 429 observed) during 8 rapid attempts" ;;
-                not-throttled) bullet "⚠" "$C_YEL" "No throttling observed on /rest/login after 8 rapid attempts" ;;
+                throttled)     printf "%s│%s  %s✓ /rest/login throttled (HTTP 429 observed) during 8 rapid attempts%s\n" "$C_CYN" "$C_RESET" "$C_GRN" "$C_RESET" ;;
+                not-throttled) printf "%s│%s  %s⚠ No throttling observed on /rest/login after 8 rapid attempts%s\n" "$C_CYN" "$C_RESET" "$C_YEL" "$C_RESET" ;;
             esac
         fi
+        footer
     fi
     if [[ -n "$WEBHOOK_BRUTE_FILE" ]]; then
         section "Webhook Path Discovery"
         if [[ ${#WEBHOOK_BRUTE_HITS[@]} -eq 0 ]]; then
-            bullet "✓" "$C_GRN" "No registered webhook paths found among $(grep -cve '^[[:space:]]*$' "$WEBHOOK_BRUTE_FILE" 2>/dev/null || echo 0) candidate(s)"
+            printf "%s│%s  %s✓ No registered webhook paths found among %s candidate(s)%s\n" "$C_CYN" "$C_RESET" "$C_GRN" "$(grep -cve '^[[:space:]]*$' "$WEBHOOK_BRUTE_FILE" 2>/dev/null || echo 0)" "$C_RESET"
         else
             for hit in "${WEBHOOK_BRUTE_HITS[@]}"; do
                 IFS='|' read -r hbase hcand hmethod hverdict hstatus <<< "$hit"
-                bullet "✗" "$C_RED" "$hverdict [$hstatus] /$hbase/$hcand ($hmethod)"
+                printf "%s│%s  %s✗ %s%s [%s] /%s/%s (%s)%s\n" "$C_CYN" "$C_RESET" "$C_RED" "$hverdict" "$C_RESET" "$hstatus" "$hbase" "$hcand" "$hmethod" "$C_RESET"
             done
         fi
+        footer
     fi
     if [[ "$RUN_NUCLEI" == true ]]; then
         section "nuclei (tag: n8n)"
         if [[ -z "$NUCLEI_OUT" ]]; then
-            bullet "✓" "$C_GRN" "No matches"
+            printf "%s│%s  %s✓ No matches%s\n" "$C_CYN" "$C_RESET" "$C_GRN" "$C_RESET"
         else
             echo "$NUCLEI_OUT" | while IFS= read -r line; do
-                row_wrap "  " "" "$line"
+                printf "%s│%s  %s\n" "$C_CYN" "$C_RESET" "$line"
             done
         fi
+        footer
     else
         echo
         printf "%s(known-CVE check skipped — rerun with --nuclei to check the detected version against nuclei's n8n-tagged CVE templates)%s\n" "$C_DIM" "$C_RESET"
     fi
     if [[ "$CVE_MODE" == true ]]; then
-        section "CVE Proof-of-Concept"
+        echo
+        printf "%s%sCVE Proof-of-Concept%s\n" "$C_BOLD" "$C_YEL" "$C_RESET"
         if [[ ${#CVE_POC_ROWS[@]} -eq 0 ]]; then
-            bullet "✓" "$C_GRN" "No known-CVE version ranges matched (detected version: $VERSION)"
+            printf "  %s✓ No known-CVE version ranges matched (detected version: %s)%s\n" "$C_GRN" "$VERSION" "$C_RESET"
         else
             printf "  %sPoC commands only ever get PRINTED, never run. Confirm scope before running any of it.%s\n" "$C_DIM" "$C_RESET"
             local ci
@@ -1470,7 +1460,7 @@ if csv_path:
                 echo
                 printf "  %s[%s]%s %s%s%s — %s\n" "$sevcolor" "$sevtag" "$C_RESET" "$C_BOLD" "${CVE_DB_ID[$dbi]}" "$C_RESET" "${CVE_DB_NAME[$dbi]}"
                 printf "      %sCVSS %s · %s · matched via: %s%s\n" "$C_DIM" "${CVE_DB_CVSS[$dbi]}" "${CVE_DB_AUTH[$dbi]}" "$(cve_src_label "$src")" "$C_RESET"
-                row_wrap "      " "Preconditions: " "${CVE_DB_NOTE[$dbi]}"
+                wrap_flat "      " "Preconditions: " "${CVE_DB_NOTE[$dbi]}"
                 printf "      %sCommand:%s\n" "$C_DIM" "$C_RESET"
                 local cmdtext="${CVE_DB_CMD[$dbi]//\{\{TARGET\}\}/$TARGET}"
                 while IFS= read -r cmdline; do
@@ -1483,36 +1473,36 @@ if csv_path:
     # Risk summary
     # -------------------------------------------------------------------
     local n_crit=0 n_high=0 n_med=0 n_low=0
-    section "Risk Summary"
+    echo
+    printf "%s%sRisk Summary%s\n" "$C_BOLD" "$C_YEL" "$C_RESET"
     for f in "${FINDINGS[@]}"; do
         IFS='|' read -r sev _cat msg <<< "$f"
         case "$sev" in
-            CRIT) ((n_crit++)); row_wrap "  " "${C_RED}${C_BOLD}[CRITICAL]${C_RESET} " "$msg" ;;
+            CRIT) ((n_crit++)); printf "  %s[CRITICAL]%s %s\n" "$C_RED$C_BOLD" "$C_RESET" "$msg" ;;
         esac
     done
     for f in "${FINDINGS[@]}"; do
         IFS='|' read -r sev _cat msg <<< "$f"
         case "$sev" in
-            HIGH) ((n_high++)); row_wrap "  " "${C_RED}[HIGH]${C_RESET}     " "$msg" ;;
+            HIGH) ((n_high++)); printf "  %s[HIGH]%s     %s\n" "$C_RED" "$C_RESET" "$msg" ;;
         esac
     done
     for f in "${FINDINGS[@]}"; do
         IFS='|' read -r sev _cat msg <<< "$f"
         case "$sev" in
-            MED)  ((n_med++));  row_wrap "  " "${C_YEL}[MEDIUM]${C_RESET}   " "$msg" ;;
+            MED)  ((n_med++));  printf "  %s[MEDIUM]%s   %s\n" "$C_YEL" "$C_RESET" "$msg" ;;
         esac
     done
     for f in "${FINDINGS[@]}"; do
         IFS='|' read -r sev _cat msg <<< "$f"
         case "$sev" in
-            LOW)  ((n_low++));  row_wrap "  " "${C_DIM}[LOW]${C_RESET}      " "$msg" ;;
+            LOW)  ((n_low++));  printf "  %s[LOW]%s      %s\n" "$C_DIM" "$C_RESET" "$msg" ;;
         esac
     done
     if [[ ${#FINDINGS[@]} -eq 0 ]]; then
         printf "  %sNo issues flagged.%s\n" "$C_GRN" "$C_RESET"
     fi
     echo
-    hr
     printf "%s%d critical, %d high, %d medium, %d low%s\n" "$C_BOLD" "$n_crit" "$n_high" "$n_med" "$n_low" "$C_RESET"
     echo
     if [[ $((n_crit + n_high)) -gt 0 ]]; then
