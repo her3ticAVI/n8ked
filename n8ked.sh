@@ -242,6 +242,11 @@ def main():
     for name, pat in PATTERNS:
         for m in re.finditer(pat, body):
             val = m.group(0)
+            # PostHog project keys (phc_...) are public, write-only client
+            # analytics identifiers meant to be embedded in frontend code —
+            # not a credential/secret, so do not flag them as one.
+            if "phc_" in val:
+                continue
             key = (name, val)
             if key in seen:
                 continue
@@ -492,7 +497,12 @@ with open(os.environ["N8KED_CSV_FILE"], "a", newline="") as f:
         if [[ -n "$u" && "$u" != "null" ]]; then
             h=$(echo "$u" | sed -E 's#^https?://##; s#/.*##')
             hl=$(echo "$h" | tr '[:upper:]' '[:lower:]')
-            if [[ -n "$h" && "$hl" != "$TARGET_HOST" ]]; then INTERNAL_HOST="$h"; break; fi
+            # Guard against junk extractions (e.g. a relative/path-only
+            # callback URL like "/rest/oauth2-credential/callback" with no
+            # host component, which would otherwise sed down to ".").
+            if [[ -n "$h" && "$hl" != "$TARGET_HOST" && "$h" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$ && "$h" == *.* ]]; then
+                INTERNAL_HOST="$h"; break
+            fi
         fi
     done
     # -------------------------------------------------------------------
@@ -858,12 +868,21 @@ with open(os.environ["N8KED_CSV_FILE"], "a", newline="") as f:
                     esac
                     if [[ -n "$nmysev" && -z "${NUCLEI_SEEN[$nbase]:-}" ]]; then
                         NUCLEI_SEEN[$nbase]=1
-                        CVE_IDS+=("$nbase")
-                        CVE_SEVS+=("${nsev,,}")
-                        local r; r=$(sev_rank "$nmysev")
-                        if [[ "$r" -gt "$WORST_RANK" ]]; then
-                            WORST_RANK="$r"
-                            WORST_SEV="$nmysev"
+                        if [[ "$nbase" =~ ^CVE-[0-9]{4}-[0-9]+ ]]; then
+                            # Genuine CVE-tagged template — fold into the
+                            # "known CVE(s)" rollup finding below.
+                            CVE_IDS+=("$nbase")
+                            CVE_SEVS+=("${nsev,,}")
+                            local r; r=$(sev_rank "$nmysev")
+                            if [[ "$r" -gt "$WORST_RANK" ]]; then
+                                WORST_RANK="$r"
+                                WORST_SEV="$nmysev"
+                            fi
+                        else
+                            # Non-CVE template (misconfig/exposure checks like
+                            # "n8n-config") — report on its own instead of
+                            # being mislabeled as a "known CVE".
+                            FINDINGS+=("$nmysev|nuclei|Nuclei detection — $nbase (${nsev,,}): $(echo "$nline" | sed -E 's/^\[[^]]+\]\ \[[^]]+\]\ \[[^]]+\]\ //')")
                         fi
                     fi
                 fi
