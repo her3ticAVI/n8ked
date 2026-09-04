@@ -620,10 +620,11 @@ EOF
         return
     fi
     echo
-    printf "%s%s  _   _  __ _              %s\n" "$C_BOLD" "$C_MAG" "$C_RESET"
-    printf "%s%s | \\ | |/ _\` |___  _____  __| %s\n" "$C_BOLD" "$C_MAG" "$C_RESET"
-    printf "%s%s |  \\| | (_| |___|/ / _ \\/ _\` |  n8ked — n8n exposure auditor%s\n" "$C_BOLD" "$C_MAG" "$C_RESET"
-    printf "%s%s |_|\\_|\\__,_|   /_/\\___/\\__,_| %s\n" "$C_BOLD" "$C_MAG" "$C_RESET"
+    printf "%s%s /░ /░    /█▀▀█    /░/░    /█▀▀▀/    /░░░ %s\n" "$C_BOLD" "$C_MAG" "$C_RESET"
+    printf "%s%s│ ▒▒ ▒   │ ▓▓▓▓   │ ▒▒/   │ ▓▓▓     │-▒_/▒%s\n" "$C_BOLD" "$C_MAG" "$C_RESET"
+    printf "%s%s│ ▓│▓▓   │ ▒ /▒   │ ▓▓    │_▒_/     │ ▓│ ▓  n8ked — n8n exposure auditor%s\n" "$C_BOLD" "$C_MAG" "$C_RESET"
+    printf "%s%s│ █│ █   │ ░░░░   │ █ █   │ ░░░░    │ ███/%s\n" "$C_BOLD" "$C_MAG" "$C_RESET"
+    printf "%s%s│//│//   │/___/   │////   │/___/    │/__/ %s\n" "$C_BOLD" "$C_MAG" "$C_RESET"
     hr
     printf "%sTarget:%s %s    %sChecked:%s %s\n" "$C_BOLD" "$C_RESET" "$TARGET" "$C_BOLD" "$C_RESET" "$(date '+%Y-%m-%d %H:%M:%S %Z')"
     hr
