@@ -47,7 +47,7 @@
 #                            editor) in addition to the production /webhook/ base
 #   --reveal-secrets         Print full secret values instead of masked previews
 #   --nuclei                 Also run nuclei's n8n-tagged templates if installed
-#   --cve                    Check the detected version against a curated
+#   --poc                    Check the detected version against a curated
 #                            database of known n8n CVEs (works standalone —
 #                            no --nuclei required — and also cross-references
 #                            any CVE-tagged nuclei hits if --nuclei is also
@@ -110,7 +110,7 @@ while [[ $# -gt 0 ]]; do
         --include-test-webhooks) INCLUDE_TEST_WEBHOOKS=true; shift ;;
         --reveal-secrets) REVEAL_SECRETS=true; shift ;;
         --nuclei) RUN_NUCLEI=true; shift ;;
-        --cve) CVE_MODE=true; shift ;;
+        --poc) CVE_MODE=true; shift ;;
         --no-color) NO_COLOR=true; shift ;;
         -h|--help) print_help; exit 0 ;;
         *)
@@ -397,7 +397,7 @@ webhook_probe() {
     fi
 }
 # ---------------------------------------------------------------------------
-# Known-CVE proof-of-concept database (used by --cve)
+# Known-CVE proof-of-concept database (used by --poc)
 # ---------------------------------------------------------------------------
 # Simple dotted-version compare (numeric, up to 4 components; anything past
 # the numeric prefix — e.g. "-beta.1" — is ignored). Good enough for n8n's
@@ -435,19 +435,21 @@ cve_src_label() {
         *)       echo "$1" ;;
     esac
 }
-wrap_box() {
-    # wrap_box <label> <text> -> prints <text> word-wrapped to fit the
-    # report's box width, with <label> (dimmed) on the first line only and
-    # continuation lines aligned under it.
-    local label="$1" text="$2"
+wrap_flat() {
+    # wrap_flat <indent> <label> <text> -> word-wraps <text> to fit the
+    # report width, no box border — used for flat (non-boxed) sections
+    # like findings/PoC output where content length is unpredictable and
+    # a fixed-width box can't close around it cleanly. <label> (dimmed)
+    # appears on the first line only; continuation lines align under it.
+    local indent="$1" label="$2" text="$3"
     local pad; pad=$(printf '%*s' "${#label}" "")
     local first=true
-    fold -s -w "$((70 - ${#label}))" <<< "$text" | while IFS= read -r wline; do
+    fold -s -w "$((74 - ${#indent} - ${#label}))" <<< "$text" | while IFS= read -r wline; do
         if [[ "$first" == true ]]; then
-            printf "%s│%s  %s%s%s%s\n" "$C_CYN" "$C_RESET" "$C_DIM" "$label" "$C_RESET" "$wline"
+            printf "%s%s%s%s%s\n" "$indent" "$C_DIM" "$label" "$C_RESET" "$wline"
             first=false
         else
-            printf "%s│%s  %s%s\n" "$C_CYN" "$C_RESET" "$pad" "$wline"
+            printf "%s%s%s\n" "$indent" "$pad" "$wline"
         fi
     done
 }
@@ -1033,7 +1035,7 @@ with open(os.environ["N8KED_CSV_FILE"], "a", newline="") as f:
         fi
     fi
     # -------------------------------------------------------------------
-    # --cve: known-CVE PoC lookup. Works standalone off the detected
+    # --poc: known-CVE PoC lookup. Works standalone off the detected
     # version (so it's useful even without --nuclei / without nuclei
     # installed), and also cross-references any CVE IDs nuclei already
     # confirmed above so both paths land in the same report section.
@@ -1267,7 +1269,35 @@ if csv_path:
     printf "%s%s│//│//   │/___/   │////   │/___/    │/__/ %s\n" "$C_BOLD" "$C_MAG" "$C_RESET"
     hr
     printf "%sTarget:%s %s    %sChecked:%s %s\n" "$C_BOLD" "$C_RESET" "$TARGET" "$C_BOLD" "$C_RESET" "$(date '+%Y-%m-%d %H:%M:%S %Z')"
-    hr
+    # ---------------------------------------------------------------
+    # Scorecard — every check has already run and FINDINGS is fully
+    # populated by this point, so the severity tally can be shown right
+    # up front for at-a-glance triage instead of only at the bottom.
+    # ---------------------------------------------------------------
+    local sc_crit=0 sc_high=0 sc_med=0 sc_low=0 f_sc
+    for f_sc in "${FINDINGS[@]}"; do
+        IFS='|' read -r sc_sev _sc_cat _sc_msg <<< "$f_sc"
+        case "$sc_sev" in
+            CRIT) ((sc_crit++)) ;;
+            HIGH) ((sc_high++)) ;;
+            MED)  ((sc_med++))  ;;
+            LOW)  ((sc_low++))  ;;
+        esac
+    done
+    printf "%s%s%s\n" "$C_DIM" "$(printf '═%.0s' $(seq 1 74))" "$C_RESET"
+    if [[ $((sc_crit + sc_high)) -gt 0 ]]; then
+        printf "  %s%sCRITICAL %d%s   %sHIGH %d%s   %sMEDIUM %d%s   %sLOW %d%s\n" \
+            "$C_BOLD" "$C_RED" "$sc_crit" "$C_RESET" \
+            "$C_RED" "$sc_high" "$C_RESET" \
+            "$C_YEL" "$sc_med" "$C_RESET" \
+            "$C_DIM" "$sc_low" "$C_RESET"
+    else
+        printf "  %s%sNo Critical/High findings%s   %sMEDIUM %d%s   %sLOW %d%s\n" \
+            "$C_BOLD" "$C_GRN" "$C_RESET" \
+            "$C_YEL" "$sc_med" "$C_RESET" \
+            "$C_DIM" "$sc_low" "$C_RESET"
+    fi
+    printf "%s%s%s\n" "$C_DIM" "$(printf '═%.0s' $(seq 1 74))" "$C_RESET"
     section "Instance Fingerprint"
     kv "HTTP root status"     "$ROOT_STATUS"
     kv "Server header"        "${SERVER_HDR:-none disclosed}"
@@ -1410,26 +1440,34 @@ if csv_path:
         printf "%s(known-CVE check skipped — rerun with --nuclei to check the detected version against nuclei's n8n-tagged CVE templates)%s\n" "$C_DIM" "$C_RESET"
     fi
     if [[ "$CVE_MODE" == true ]]; then
-        section "CVE Proof-of-Concept"
+        echo
+        printf "%s%sCVE Proof-of-Concept%s\n" "$C_BOLD" "$C_YEL" "$C_RESET"
         if [[ ${#CVE_POC_ROWS[@]} -eq 0 ]]; then
-            printf "%s│%s  %s✓ No known-CVE version ranges matched (detected version: %s)%s\n" "$C_CYN" "$C_RESET" "$C_GRN" "$VERSION" "$C_RESET"
+            printf "  %s✓ No known-CVE version ranges matched (detected version: %s)%s\n" "$C_GRN" "$VERSION" "$C_RESET"
         else
-            printf "%s│%s  %sPoC commands only ever get PRINTED, never run. * = see Preconditions. Confirm scope first.%s\n" "$C_CYN" "$C_RESET" "$C_YEL" "$C_RESET"
+            printf "  %sPoC commands only ever get PRINTED, never run. Confirm scope before running any of it.%s\n" "$C_DIM" "$C_RESET"
             local ci
             for ci in "${!CVE_POC_ROWS[@]}"; do
                 local dbi="${CVE_POC_ROWS[$ci]}" src="${CVE_POC_SOURCES[$ci]}"
-                printf "%s│%s\n" "$C_CYN" "$C_RESET"
-                printf "%s│%s  %s%s%s — %s\n" "$C_CYN" "$C_RESET" "$C_BOLD$C_RED" "${CVE_DB_ID[$dbi]}" "$C_RESET" "${CVE_DB_NAME[$dbi]}"
-                printf "%s│%s  %sCVSS %s | %s | matched via: %s%s\n" "$C_CYN" "$C_RESET" "$C_DIM" "${CVE_DB_CVSS[$dbi]}" "${CVE_DB_AUTH[$dbi]}" "$(cve_src_label "$src")" "$C_RESET"
-                wrap_box "Preconditions: " "${CVE_DB_NOTE[$dbi]}"
-                printf "%s│%s  %sCommand:%s\n" "$C_CYN" "$C_RESET" "$C_DIM" "$C_RESET"
+                local pocsev sevtag sevcolor
+                pocsev=$(cvss_to_sev "${CVE_DB_CVSS[$dbi]}")
+                case "$pocsev" in
+                    CRIT) sevtag="CRITICAL"; sevcolor="$C_RED$C_BOLD" ;;
+                    HIGH) sevtag="HIGH";     sevcolor="$C_RED" ;;
+                    MED)  sevtag="MEDIUM";   sevcolor="$C_YEL" ;;
+                    *)    sevtag="LOW";      sevcolor="$C_DIM" ;;
+                esac
+                echo
+                printf "  %s[%s]%s %s%s%s — %s\n" "$sevcolor" "$sevtag" "$C_RESET" "$C_BOLD" "${CVE_DB_ID[$dbi]}" "$C_RESET" "${CVE_DB_NAME[$dbi]}"
+                printf "      %sCVSS %s · %s · matched via: %s%s\n" "$C_DIM" "${CVE_DB_CVSS[$dbi]}" "${CVE_DB_AUTH[$dbi]}" "$(cve_src_label "$src")" "$C_RESET"
+                wrap_flat "      " "Preconditions: " "${CVE_DB_NOTE[$dbi]}"
+                printf "      %sCommand:%s\n" "$C_DIM" "$C_RESET"
                 local cmdtext="${CVE_DB_CMD[$dbi]//\{\{TARGET\}\}/$TARGET}"
                 while IFS= read -r cmdline; do
-                    printf "%s│%s    %s\n" "$C_CYN" "$C_RESET" "$cmdline"
+                    printf "        %s%s%s\n" "$C_GRN" "$cmdline" "$C_RESET"
                 done <<< "$cmdtext"
             done
         fi
-        footer
     fi
     # -------------------------------------------------------------------
     # Risk summary
