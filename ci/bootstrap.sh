@@ -18,7 +18,7 @@ log "n8n reports healthy"
 
 # --- Create the owner account, with retries ---
 # /healthz can return 200 before n8n's Express routes finish registering
-# (DB migrations still running), so a 404 on the very first attempt does
+# (DB migrations still running), so a non-200 on the first attempt does
 # NOT necessarily mean the endpoint is wrong -- retry before giving up.
 OWNER_PAYLOAD='{"email":"testadmin@example.com","firstName":"CI","lastName":"Bot","password":"TestPass123!"}'
 OWNER_OK=false
@@ -47,7 +47,12 @@ log "owner account created"
 SETTINGS_STATUS=$(curl -sk -b "$COOKIE_JAR" -o /dev/null -w '%{http_code}' "$BASE/rest/login")
 log "session probe (/rest/login): HTTP $SETTINGS_STATUS"
 
-# --- Create a webhook workflow ---
+# --- Create a webhook workflow, with retries ---
+# Some versions return HTTP 200 with n8n's own "n8n is starting up.
+# Please wait" placeholder body while internal services (workflow
+# repository, etc.) are still coming up, even though auth routes already
+# work. A 200 status alone isn't proof the response is real JSON -- retry
+# until it actually is.
 WF_JSON='{"name":"ci-webhook","active":false,"nodes":[
   {"id":"1","name":"Webhook","type":"n8n-nodes-base.webhook","typeVersion":1,"position":[250,300],
    "parameters":{"path":"ci-test-hook","httpMethod":"GET","responseMode":"onReceived"}},
@@ -55,32 +60,32 @@ WF_JSON='{"name":"ci-webhook","active":false,"nodes":[
    "parameters":{"values":{"string":[{"name":"ok","value":"true"}]}}}
 ],"connections":{"Webhook":{"main":[[{"node":"Respond","type":"main","index":0}]]}}}'
 
-WF_BODY_FILE=$(mktemp)
-WF_STATUS=$(curl -sk -b "$COOKIE_JAR" -X POST "$BASE/rest/workflows" \
-    -H 'Content-Type: application/json' --data "$WF_JSON" \
-    -o "$WF_BODY_FILE" -w '%{http_code}' 2>/dev/null)
-log "create workflow: HTTP $WF_STATUS"
+WF_ID=""
+for i in {1..10}; do
+    WF_BODY_FILE=$(mktemp)
+    WF_STATUS=$(curl -sk -b "$COOKIE_JAR" -X POST "$BASE/rest/workflows" \
+        -H 'Content-Type: application/json' --data "$WF_JSON" \
+        -o "$WF_BODY_FILE" -w '%{http_code}' 2>/dev/null)
+    log "create workflow attempt $i: HTTP $WF_STATUS"
 
-if [[ "$WF_STATUS" != "200" ]]; then
-    log "FATAL: workflow creation failed."
-    log "response body: $(cat "$WF_BODY_FILE" | head -c 500)"
-    exit 1
-fi
+    if [[ "$WF_STATUS" == "200" ]] && jq -e . "$WF_BODY_FILE" >/dev/null 2>&1; then
+        CANDIDATE_ID=$(jq -r '.data.id // empty' "$WF_BODY_FILE")
+        if [[ -n "$CANDIDATE_ID" ]]; then
+            WF_ID="$CANDIDATE_ID"
+            break
+        fi
+    fi
+    log "response body: $(cat "$WF_BODY_FILE" | head -c 300)"
+    sleep 3
+done
 
-if ! jq -e . "$WF_BODY_FILE" >/dev/null 2>&1; then
-    log "FATAL: workflow creation response wasn't valid JSON:"
-    log "$(cat "$WF_BODY_FILE" | head -c 500)"
-    exit 1
-fi
-
-WF_ID=$(jq -r '.data.id' "$WF_BODY_FILE")
-if [[ -z "$WF_ID" || "$WF_ID" == "null" ]]; then
-    log "FATAL: no workflow id in response: $(cat "$WF_BODY_FILE")"
+if [[ -z "$WF_ID" ]]; then
+    log "FATAL: workflow creation never succeeded with a valid id after 10 attempts."
     exit 1
 fi
 log "workflow created: id=$WF_ID"
 
-# --- Activate it (makes the persistent /webhook/ci-test-hook path live) ---
+# --- Activate it ---
 # NOTE: the internal/session-cookie API (/rest/...) has NO dedicated
 # "/activate" route -- that only exists on the Public API (/api/v1/...,
 # API-key auth). On the internal API, activation is a PATCH to the
@@ -95,6 +100,30 @@ log "activate workflow: HTTP $ACT_STATUS"
 if [[ "$ACT_STATUS" != "200" ]]; then
     log "FATAL: workflow activation failed (HTTP $ACT_STATUS)"
     log "response body: $(cat "$ACT_BODY_FILE" | head -c 500)"
+    exit 1
+fi
+
+# --- Verify the webhook is ACTUALLY live before declaring bootstrap done ---
+# The PATCH above returning 200 only means the database row got flipped
+# to active=true -- n8n registers the real webhook route asynchronously
+# afterward. Poll the real endpoint until it responds correctly instead
+# of trusting the activation call's status code alone; otherwise n8ked.sh
+# can run against the target before the webhook is actually reachable.
+WEBHOOK_LIVE=false
+for i in {1..20}; do
+    WH_BODY_FILE=$(mktemp)
+    WH_STATUS=$(curl -sk -o "$WH_BODY_FILE" -w '%{http_code}' "$BASE/webhook/ci-test-hook" 2>/dev/null)
+    if [[ "$WH_STATUS" =~ ^2 ]] && ! grep -qi 'not registered' "$WH_BODY_FILE"; then
+        WEBHOOK_LIVE=true
+        log "webhook verified live after $i attempt(s) (HTTP $WH_STATUS)"
+        break
+    fi
+    sleep 1
+done
+
+if [[ "$WEBHOOK_LIVE" != true ]]; then
+    log "FATAL: webhook never became live at $BASE/webhook/ci-test-hook after 20s"
+    log "last status: HTTP $WH_STATUS, body: $(cat "$WH_BODY_FILE" | head -c 300)"
     exit 1
 fi
 
