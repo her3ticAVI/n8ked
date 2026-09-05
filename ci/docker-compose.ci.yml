@@ -1,0 +1,28 @@
+services:
+  n8n:
+    image: n8nio/n8n:${N8N_VERSION:-1.121.0}
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_HOST=localhost
+      - N8N_PROTOCOL=http
+      - WEBHOOK_URL=http://localhost:5678/
+      - GENERIC_TIMEZONE=UTC
+    networks: [labnet]
+
+  # Fronts n8n with headers/CORS/file-exposure conditions the raw n8n
+  # image never produces on its own -- lets us test detection logic
+  # against known-good/known-bad configs rather than n8n's real behavior.
+  nginx-front:
+    image: nginx:alpine
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./nginx-front.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./fake-secrets/.env:/usr/share/nginx/leaky/.env:ro
+    depends_on: [n8n]
+    networks: [labnet]
+
+networks:
+  labnet:
+    driver: bridge
