@@ -6,12 +6,6 @@ COOKIE_JAR=$(mktemp)
 log() { echo "[bootstrap] $*" >&2; }
 
 is_placeholder() {
-    # n8n serves a "n8n is starting up. Please wait" page (HTTP 200) from
-    # what appears to be a separate, minimal pre-boot server that answers
-    # ANY request regardless of auth -- not the real app. Any cookie
-    # issued while talking to this placeholder is not trustworthy once
-    # the real app swaps in, so we must positively confirm we're past it
-    # before trusting any response, cookie, or status code.
     grep -qi 'starting up' "$1" 2>/dev/null
 }
 
@@ -68,13 +62,15 @@ fi
 log "owner account created"
 
 # --- Re-authenticate fresh, right before using the cookie for anything ---
-# Don't reuse the cookie issued during owner/setup -- get an explicitly
-# fresh one now that we've confirmed the real app is up, so there is no
-# possibility of relying on a session issued by a pre-boot process.
+# Send BOTH the modern field name (emailOrLdapLoginId, added when LDAP
+# login support was introduced) and the legacy "email" field in the same
+# request -- whichever one this version's login DTO actually reads will
+# be picked up, and a 500 rather than 400 on prior attempts confirms this
+# backend doesn't strictly reject unrecognized fields, so this is safe.
 LOGIN_BODY_FILE=$(mktemp)
 LOGIN_STATUS=$(curl -sk -c "$COOKIE_JAR" -X POST "$BASE/rest/login" \
     -H 'Content-Type: application/json' \
-    --data '{"emailOrLdapLoginId":"testadmin@example.com","password":"TestPass123!"}' \
+    --data '{"email":"testadmin@example.com","emailOrLdapLoginId":"testadmin@example.com","password":"TestPass123!"}' \
     -o "$LOGIN_BODY_FILE" -w '%{http_code}' 2>/dev/null)
 log "fresh login: HTTP $LOGIN_STATUS"
 if [[ "$LOGIN_STATUS" != "200" ]]; then
