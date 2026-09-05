@@ -33,7 +33,19 @@ jobs:
       - name: Run n8ked.sh against n8n directly
         run: |
           chmod +x ./n8ked.sh
+          # n8ked.sh exits 1 when it finds Critical/High findings -- that's
+          # documented, expected behavior for a real scan (e.g. community
+          # edition always fails "MFA not enforced"), not a script error.
+          # Only exit code 2 (target not identifiable as n8n) is a genuine
+          # problem worth failing the CI step over.
+          set +e
           ./n8ked.sh http://localhost:5678 --poc --json > result-n8n-${{ matrix.n8n_version }}.json
+          RC=$?
+          set -e
+          if [[ $RC -eq 2 ]]; then
+            echo "n8ked.sh could not identify the target as n8n (exit 2)"
+            exit 1
+          fi
           cat result-n8n-${{ matrix.n8n_version }}.json | python3 -m json.tool
 
       - name: Assert expected findings
@@ -41,34 +53,54 @@ jobs:
 
       - name: Credential test (--test-cred)
         run: |
+          set +e
           ./n8ked.sh http://localhost:5678 \
             --test-cred testadmin@example.com:TestPass123! --json > cred-result.json
+          RC=$?
+          set -e
+          [[ $RC -eq 2 ]] && { echo "target not identifiable as n8n"; exit 1; }
           jq -e '.credential_test == "success"' cred-result.json
 
       - name: Credential test (--userpass, expects the valid pair mid-list)
         run: |
           printf 'wrong1:wrong1\nwrong2:wrong2\ntestadmin@example.com:TestPass123!\nwrong3:wrong3\n' > /tmp/creds.txt
+          set +e
           ./n8ked.sh http://localhost:5678 \
             --userpass /tmp/creds.txt --brute-delay 0 --json > brute-result.json
+          RC=$?
+          set -e
+          [[ $RC -eq 2 ]] && { echo "target not identifiable as n8n"; exit 1; }
           jq -e '.bruteforce.valid_count == 1 and .bruteforce.tried == 3' brute-result.json
 
       - name: Webhook discovery test (against nginx fixture, not live n8n)
         run: |
           printf 'ci-test-hook\nnonexistent-path\n' > /tmp/webhook_paths.txt
+          set +e
           ./n8ked.sh http://localhost:8080 \
             --webhook-brute /tmp/webhook_paths.txt --webhook-delay 0 --json > wh-result.json
+          RC=$?
+          set -e
+          [[ $RC -eq 2 ]] && { echo "target not identifiable as n8n"; exit 1; }
           jq -e '.webhook_bruteforce.hits | length == 1' wh-result.json
           jq -e '.webhook_bruteforce.hits[0].path == "ci-test-hook"' wh-result.json
 
       - name: Header/CORS/file-exposure test (against nginx sidecar)
         run: |
+          set +e
           ./n8ked.sh http://localhost:8080 --json > result-nginx.json
+          RC=$?
+          set -e
+          [[ $RC -eq 2 ]] && { echo "target not identifiable as n8n"; exit 1; }
           jq -e '[.findings[] | select(.category=="cors" and (.message | test("credential")))] | length == 1' result-nginx.json
           jq -e '[.findings[] | select(.category=="header" and (.message | test("x-n8n-origin"; "i")))] | length == 1' result-nginx.json
 
       - name: Secret scan test (planted fake secrets via nginx fixture)
         run: |
+          set +e
           ./n8ked.sh http://localhost:8080 --json > result-secrets.json
+          RC=$?
+          set -e
+          [[ $RC -eq 2 ]] && { echo "target not identifiable as n8n"; exit 1; }
 
           jq -e '[.findings[] | select(.category=="access-control" and (.message | test("/rest/variables")))] | length == 1' result-secrets.json
           jq -e '[.findings[] | select(.category=="secret")] | length >= 6' result-secrets.json
@@ -84,7 +116,11 @@ jobs:
 
       - name: Secret scan test with --reveal-secrets (full values shown)
         run: |
+          set +e
           ./n8ked.sh http://localhost:8080 --reveal-secrets --json > result-secrets-revealed.json
+          RC=$?
+          set -e
+          [[ $RC -eq 2 ]] && { echo "target not identifiable as n8n"; exit 1; }
           jq -e '[.findings[] | select(.message | test("AKIAFAKE1234567890AB"))] | length == 1' result-secrets-revealed.json
           jq -e '[.findings[] | select(.message | test("ghp_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE"))] | length == 1' result-secrets-revealed.json
 
