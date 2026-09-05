@@ -5,6 +5,16 @@ COOKIE_JAR=$(mktemp)
 
 log() { echo "[bootstrap] $*" >&2; }
 
+is_placeholder() {
+    # n8n serves a "n8n is starting up. Please wait" page (HTTP 200) from
+    # what appears to be a separate, minimal pre-boot server that answers
+    # ANY request regardless of auth -- not the real app. Any cookie
+    # issued while talking to this placeholder is not trustworthy once
+    # the real app swaps in, so we must positively confirm we're past it
+    # before trusting any response, cookie, or status code.
+    grep -qi 'starting up' "$1" 2>/dev/null
+}
+
 # --- Wait for n8n to be healthy ---
 for i in {1..30}; do
     curl -sf "$BASE/healthz" >/dev/null 2>&1 && break
@@ -16,10 +26,24 @@ for i in {1..30}; do
 done
 log "n8n reports healthy"
 
+# --- Wait until the REAL app (not the placeholder) is serving requests ---
+REAL_APP_UP=false
+for i in {1..40}; do
+    PROBE_FILE=$(mktemp)
+    curl -sk -o "$PROBE_FILE" "$BASE/rest/settings" 2>/dev/null
+    if ! is_placeholder "$PROBE_FILE"; then
+        REAL_APP_UP=true
+        log "real app confirmed up after $i probe(s)"
+        break
+    fi
+    sleep 2
+done
+if [[ "$REAL_APP_UP" != true ]]; then
+    log "FATAL: still seeing the startup placeholder after 80s"
+    exit 1
+fi
+
 # --- Create the owner account, with retries ---
-# /healthz can return 200 before n8n's Express routes finish registering
-# (DB migrations still running), so a non-200 on the first attempt does
-# NOT necessarily mean the endpoint is wrong -- retry before giving up.
 OWNER_PAYLOAD='{"email":"testadmin@example.com","firstName":"CI","lastName":"Bot","password":"TestPass123!"}'
 OWNER_OK=false
 for i in {1..10}; do
@@ -29,7 +53,7 @@ for i in {1..10}; do
         --data "$OWNER_PAYLOAD" \
         -o "$OWNER_BODY_FILE" -w '%{http_code}' 2>/dev/null)
     log "owner setup attempt $i: HTTP $OWNER_STATUS"
-    if [[ "$OWNER_STATUS" == "200" ]]; then
+    if [[ "$OWNER_STATUS" == "200" ]] && ! is_placeholder "$OWNER_BODY_FILE"; then
         OWNER_OK=true
         break
     fi
@@ -43,15 +67,24 @@ if [[ "$OWNER_OK" != true ]]; then
 fi
 log "owner account created"
 
-# --- Sanity-check the session cookie actually works before using it ---
-SETTINGS_STATUS=$(curl -sk -b "$COOKIE_JAR" -o /dev/null -w '%{http_code}' "$BASE/rest/login")
-log "session probe (/rest/login): HTTP $SETTINGS_STATUS"
+# --- Re-authenticate fresh, right before using the cookie for anything ---
+# Don't reuse the cookie issued during owner/setup -- get an explicitly
+# fresh one now that we've confirmed the real app is up, so there is no
+# possibility of relying on a session issued by a pre-boot process.
+LOGIN_BODY_FILE=$(mktemp)
+LOGIN_STATUS=$(curl -sk -c "$COOKIE_JAR" -X POST "$BASE/rest/login" \
+    -H 'Content-Type: application/json' \
+    --data '{"emailOrLdapLoginId":"testadmin@example.com","password":"TestPass123!"}' \
+    -o "$LOGIN_BODY_FILE" -w '%{http_code}' 2>/dev/null)
+log "fresh login: HTTP $LOGIN_STATUS"
+if [[ "$LOGIN_STATUS" != "200" ]]; then
+    log "FATAL: fresh login failed (HTTP $LOGIN_STATUS)"
+    log "response body: $(cat "$LOGIN_BODY_FILE" | head -c 500)"
+    exit 1
+fi
+log "fresh session established"
 
 # --- Create a webhook workflow, with retries ---
-# Some versions return HTTP 200 with n8n's own "n8n is starting up.
-# Please wait" placeholder body while internal services are still coming
-# up, even though auth routes already work. Retry until the response is
-# real JSON with an id, not just a 200 status.
 WF_JSON='{"name":"ci-webhook","active":false,"nodes":[
   {"id":"1","name":"Webhook","type":"n8n-nodes-base.webhook","typeVersion":1,"position":[250,300],
    "parameters":{"path":"ci-test-hook","httpMethod":"GET","responseMode":"onReceived"}},
@@ -84,14 +117,7 @@ if [[ -z "$WF_ID" ]]; then
 fi
 log "workflow created: id=$WF_ID"
 
-# --- Activate it ---
-# A bare {"active": true} PATCH can flip the DB flag without triggering
-# the webhook-registration hook on some versions -- that hook appears to
-# only fire when the FULL current workflow object is resent, mirroring
-# what the editor UI does when you flip the Active toggle (it always
-# saves the complete current workflow state, not a partial delta). So:
-# fetch the full workflow first, flip active=true on that object, then
-# PATCH the whole thing back.
+# --- Activate it (full-object PATCH, not a bare partial) ---
 GET_BODY_FILE=$(mktemp)
 GET_STATUS=$(curl -sk -b "$COOKIE_JAR" "$BASE/rest/workflows/$WF_ID" \
     -o "$GET_BODY_FILE" -w '%{http_code}' 2>/dev/null)
