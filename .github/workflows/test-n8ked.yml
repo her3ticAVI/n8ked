@@ -1,0 +1,83 @@
+name: n8ked feature tests
+
+on:
+  push:
+    paths: ["n8ked.sh", "ci/**", ".github/workflows/test-n8ked.yml"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  baseline:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        n8n_version: ["1.65.0", "1.90.0", "1.121.0", "1.123.20"]
+      fail-fast: false
+    env:
+      N8N_VERSION: ${{ matrix.n8n_version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start lab environment
+        run: docker compose -f ci/docker-compose.ci.yml up -d
+
+      - name: Bootstrap n8n (owner + workflow)
+        run: |
+          chmod +x ci/bootstrap.sh
+          ./ci/bootstrap.sh http://localhost:5678
+
+      - name: Run n8ked.sh against n8n directly
+        run: |
+          chmod +x ./n8ked.sh
+          ./n8ked.sh http://localhost:5678 --poc --json > result-n8n-${{ matrix.n8n_version }}.json
+          cat result-n8n-${{ matrix.n8n_version }}.json | python3 -m json.tool
+
+      - name: Assert expected findings
+        run: python3 ci/assert_findings.py result-n8n-${{ matrix.n8n_version }}.json
+
+      - name: Credential test (--test-cred)
+        run: |
+          ./n8ked.sh http://localhost:5678 \
+            --test-cred testadmin@example.com:TestPass123! --json > cred-result.json
+          jq -e '.credential_test == "success"' cred-result.json
+
+      - name: Credential test (--userpass, expects the valid pair mid-list)
+        run: |
+          printf 'wrong1:wrong1\nwrong2:wrong2\ntestadmin@example.com:TestPass123!\nwrong3:wrong3\n' > /tmp/creds.txt
+          ./n8ked.sh http://localhost:5678 \
+            --userpass /tmp/creds.txt --brute-delay 0 --json > brute-result.json
+          jq -e '.bruteforce.valid_count == 1 and .bruteforce.tried == 3' brute-result.json
+
+      - name: Webhook discovery test
+        run: |
+          printf 'ci-test-hook\nnonexistent-path\n' > /tmp/webhook_paths.txt
+          ./n8ked.sh http://localhost:5678 \
+            --webhook-brute /tmp/webhook_paths.txt --webhook-delay 0 --json > wh-result.json
+          jq -e '.webhook_bruteforce.hits | length == 1' wh-result.json
+          jq -e '.webhook_bruteforce.hits[0].path == "ci-test-hook"' wh-result.json
+
+      - name: Header/CORS/file-exposure test (against nginx sidecar)
+        run: |
+          ./n8ked.sh http://localhost:8080 --json > result-nginx.json
+          jq -e '[.findings[] | select(.category=="cors" and (.message | test("credential")))] | length == 1' result-nginx.json
+          jq -e '[.findings[] | select(.category=="header" and (.message | test("x-n8n-origin"; "i")))] | length == 1' result-nginx.json
+
+      - name: Non-n8n target sanity check
+        run: |
+          ./n8ked.sh http://localhost:8080/notreal --json > result-notn8n.json || true
+          jq -e '.error != null' result-notn8n.json
+
+      - name: Upload results as artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: n8ked-results-${{ matrix.n8n_version }}
+          path: |
+            result-*.json
+            cred-result.json
+            brute-result.json
+            wh-result.json
+
+      - name: Tear down lab
+        if: always()
+        run: docker compose -f ci/docker-compose.ci.yml down -v
