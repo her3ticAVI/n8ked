@@ -49,10 +49,9 @@ log "session probe (/rest/login): HTTP $SETTINGS_STATUS"
 
 # --- Create a webhook workflow, with retries ---
 # Some versions return HTTP 200 with n8n's own "n8n is starting up.
-# Please wait" placeholder body while internal services (workflow
-# repository, etc.) are still coming up, even though auth routes already
-# work. A 200 status alone isn't proof the response is real JSON -- retry
-# until it actually is.
+# Please wait" placeholder body while internal services are still coming
+# up, even though auth routes already work. Retry until the response is
+# real JSON with an id, not just a 200 status.
 WF_JSON='{"name":"ci-webhook","active":false,"nodes":[
   {"id":"1","name":"Webhook","type":"n8n-nodes-base.webhook","typeVersion":1,"position":[250,300],
    "parameters":{"path":"ci-test-hook","httpMethod":"GET","responseMode":"onReceived"}},
@@ -86,15 +85,29 @@ fi
 log "workflow created: id=$WF_ID"
 
 # --- Activate it ---
-# NOTE: the internal/session-cookie API (/rest/...) has NO dedicated
-# "/activate" route -- that only exists on the Public API (/api/v1/...,
-# API-key auth). On the internal API, activation is a PATCH to the
-# workflow itself with {"active": true} -- the same call the editor UI
-# makes when you flip the Active toggle.
+# A bare {"active": true} PATCH can flip the DB flag without triggering
+# the webhook-registration hook on some versions -- that hook appears to
+# only fire when the FULL current workflow object is resent, mirroring
+# what the editor UI does when you flip the Active toggle (it always
+# saves the complete current workflow state, not a partial delta). So:
+# fetch the full workflow first, flip active=true on that object, then
+# PATCH the whole thing back.
+GET_BODY_FILE=$(mktemp)
+GET_STATUS=$(curl -sk -b "$COOKIE_JAR" "$BASE/rest/workflows/$WF_ID" \
+    -o "$GET_BODY_FILE" -w '%{http_code}' 2>/dev/null)
+log "fetch workflow before activation: HTTP $GET_STATUS"
+if [[ "$GET_STATUS" != "200" ]]; then
+    log "FATAL: could not fetch workflow $WF_ID before activation (HTTP $GET_STATUS)"
+    log "response body: $(cat "$GET_BODY_FILE" | head -c 300)"
+    exit 1
+fi
+
+FULL_WF_JSON=$(jq -c '.data | .active = true' "$GET_BODY_FILE")
+
 ACT_BODY_FILE=$(mktemp)
 ACT_STATUS=$(curl -sk -b "$COOKIE_JAR" -X PATCH "$BASE/rest/workflows/$WF_ID" \
     -H 'Content-Type: application/json' \
-    --data '{"active":true}' \
+    --data "$FULL_WF_JSON" \
     -o "$ACT_BODY_FILE" -w '%{http_code}' 2>/dev/null)
 log "activate workflow: HTTP $ACT_STATUS"
 if [[ "$ACT_STATUS" != "200" ]]; then
@@ -104,11 +117,6 @@ if [[ "$ACT_STATUS" != "200" ]]; then
 fi
 
 # --- Verify the webhook is ACTUALLY live before declaring bootstrap done ---
-# The PATCH above returning 200 only means the database row got flipped
-# to active=true -- n8n registers the real webhook route asynchronously
-# afterward. Poll the real endpoint until it responds correctly instead
-# of trusting the activation call's status code alone; otherwise n8ked.sh
-# can run against the target before the webhook is actually reachable.
 WEBHOOK_LIVE=false
 for i in {1..20}; do
     WH_BODY_FILE=$(mktemp)
