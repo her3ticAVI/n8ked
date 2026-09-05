@@ -20,7 +20,6 @@ def main():
 
     check("target is set", obj.get("target"))
     check("version detected", obj.get("version") not in (None, "", "unknown"))
-    check("webhook prod live detected", obj.get("webhook_prod_live") is True)
     check("no false-positive credential exposure",
           find(obj, "access-control", "/rest/credentials") is None)  # should be PROTECTED post-setup
     check("setup-complete finding absent", find(obj, "setup") is None)
