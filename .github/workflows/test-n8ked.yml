@@ -33,11 +33,6 @@ jobs:
       - name: Run n8ked.sh against n8n directly
         run: |
           chmod +x ./n8ked.sh
-          # n8ked.sh exits 1 when it finds Critical/High findings -- that's
-          # documented, expected behavior for a real scan (e.g. community
-          # edition always fails "MFA not enforced"), not a script error.
-          # Only exit code 2 (target not identifiable as n8n) is a genuine
-          # problem worth failing the CI step over.
           set +e
           ./n8ked.sh http://localhost:5678 --poc --json > result-n8n-${{ matrix.n8n_version }}.json
           RC=$?
@@ -91,7 +86,7 @@ jobs:
           RC=$?
           set -e
           [[ $RC -eq 2 ]] && { echo "target not identifiable as n8n"; exit 1; }
-          jq -e '[.findings[] | select(.category=="cors" and (.message | test("credential")))] | length == 1' result-nginx.json
+          jq -e '[.findings[] | select(.category=="cors" and (.message | test("credential"; "i")))] | length == 1' result-nginx.json
           jq -e '[.findings[] | select(.category=="header" and (.message | test("x-n8n-origin"; "i")))] | length == 1' result-nginx.json
 
       - name: Secret scan test (planted fake secrets via nginx fixture)
