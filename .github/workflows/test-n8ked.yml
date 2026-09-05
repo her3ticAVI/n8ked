@@ -21,10 +21,14 @@ jobs:
       - name: Start lab environment
         run: docker compose -f ci/docker-compose.ci.yml up -d
 
-      - name: Bootstrap n8n (owner + workflow)
+      - name: Bootstrap n8n (owner account only)
         run: |
           chmod +x ci/bootstrap.sh
           ./ci/bootstrap.sh http://localhost:5678
+
+      - name: Dump n8n container logs on bootstrap failure
+        if: failure()
+        run: docker compose -f ci/docker-compose.ci.yml logs n8n
 
       - name: Run n8ked.sh against n8n directly
         run: |
@@ -48,10 +52,10 @@ jobs:
             --userpass /tmp/creds.txt --brute-delay 0 --json > brute-result.json
           jq -e '.bruteforce.valid_count == 1 and .bruteforce.tried == 3' brute-result.json
 
-      - name: Webhook discovery test
+      - name: Webhook discovery test (against nginx fixture, not live n8n)
         run: |
           printf 'ci-test-hook\nnonexistent-path\n' > /tmp/webhook_paths.txt
-          ./n8ked.sh http://localhost:5678 \
+          ./n8ked.sh http://localhost:8080 \
             --webhook-brute /tmp/webhook_paths.txt --webhook-delay 0 --json > wh-result.json
           jq -e '.webhook_bruteforce.hits | length == 1' wh-result.json
           jq -e '.webhook_bruteforce.hits[0].path == "ci-test-hook"' wh-result.json
@@ -66,10 +70,7 @@ jobs:
         run: |
           ./n8ked.sh http://localhost:8080 --json > result-secrets.json
 
-          # exposure of the fixture endpoint itself
           jq -e '[.findings[] | select(.category=="access-control" and (.message | test("/rest/variables")))] | length == 1' result-secrets.json
-
-          # each planted secret type is caught
           jq -e '[.findings[] | select(.category=="secret")] | length >= 6' result-secrets.json
           jq -e '[.findings[] | select(.category=="secret" and (.message | test("AWS Access Key ID")))] | length == 1' result-secrets.json
           jq -e '[.findings[] | select(.category=="secret" and (.message | test("Generic API key")))] | length == 1' result-secrets.json
@@ -78,9 +79,7 @@ jobs:
           jq -e '[.findings[] | select(.category=="secret" and (.message | test("DB connection string")))] | length == 1' result-secrets.json
           jq -e '[.findings[] | select(.category=="secret" and (.message | test("GitHub token")))] | length == 1' result-secrets.json
 
-          # masked by default -- the full raw value must NOT leak into the report
           ! jq -e '[.findings[] | select(.message | test("AKIAFAKE1234567890AB"))] | length > 0' result-secrets.json
-          # but the masked prefix should be visible
           jq -e '[.findings[] | select(.message | test("AKIA\\.\\.\\.90AB"))] | length == 1' result-secrets.json
 
       - name: Secret scan test with --reveal-secrets (full values shown)
