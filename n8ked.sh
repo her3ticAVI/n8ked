@@ -216,6 +216,26 @@ CURL="curl -skL --post301 --post302 --post303 --max-time 10"
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 # ---------------------------------------------------------------------------
+# Header helpers — $CURL follows redirects (-L), so `curl -D -` output can
+# contain MULTIPLE header blocks back-to-back (one per hop). Anything that
+# wants "the final response's headers" (status line, Server:, security
+# headers, disclosure headers) must look at the LAST block, not just
+# grep/head the whole blob — otherwise a redirect hop's status/headers get
+# misattributed to the final page. The one deliberate exception is the
+# "did we redirect to https" check, which intentionally scans every hop.
+# ---------------------------------------------------------------------------
+last_header_block() {
+    # Reads curl -D - output (possibly multiple hops) on stdin and prints
+    # only the block belonging to the LAST hop. Resets the accumulator
+    # every time a new "HTTP/" status line is seen, so it doesn't depend
+    # on exact blank-line framing between hops.
+    awk '
+        /^HTTP\// { block=""; }
+        { block = block $0 "\n" }
+        END { printf "%s", block }
+    '
+}
+# ---------------------------------------------------------------------------
 # Secret scanning patterns (python3 only — most reliable regex engine we
 # can count on being present since it's also our JSON fallback)
 # ---------------------------------------------------------------------------
@@ -346,9 +366,15 @@ is_empty_body() {
 # and (with throwaway creds) the --check-lockout probe.
 n8n_try_login() {
     local tgt="$1" cu="$2" cp="$3"
+    # Credentials are JSON-escaped (not hand-interpolated) so a password or
+    # username containing a quote/backslash doesn't corrupt the request
+    # body and get silently misread as an invalid login.
+    local cu_json cp_json
+    cu_json=$(printf '%s' "$cu" | json_escape)
+    cp_json=$(printf '%s' "$cp" | json_escape)
     local resp
     resp=$($CURL -X POST "$tgt/rest/login" -H "Content-Type: application/json" \
-        --data "{\"emailOrLdapLoginId\":\"${cu}\",\"password\":\"${cp}\"}" 2>/dev/null)
+        --data "{\"emailOrLdapLoginId\":${cu_json},\"password\":${cp_json}}" 2>/dev/null)
     if echo "$resp" | grep -qE '"code"[[:space:]]*:[[:space:]]*401'; then
         echo "fail"
     elif echo "$resp" | grep -q '"id"' && echo "$resp" | grep -qi '"email"'; then
@@ -534,11 +560,14 @@ scan_target() {
     fi
     TARGET="${TARGET%/}"
     local FINDINGS=()   # "SEV|message"
-    local ROOT_HEADERS ROOT_STATUS SERVER_HDR ROOT_BODY_FILE
+    local ROOT_HEADERS ROOT_HEADERS_FINAL ROOT_STATUS SERVER_HDR ROOT_BODY_FILE
     ROOT_BODY_FILE="$TMPDIR/root.body"
     ROOT_HEADERS=$($CURL -D - -o "$ROOT_BODY_FILE" "$TARGET/" 2>/dev/null)
-    ROOT_STATUS=$(echo "$ROOT_HEADERS" | head -1 | tr -d '\r')
-    SERVER_HDR=$(echo "$ROOT_HEADERS" | grep -i '^server:' | head -1 | cut -d' ' -f2- | tr -d '\r')
+    # ROOT_HEADERS may contain several redirect hops back-to-back; anything
+    # asking about "the final response" needs just the last block.
+    ROOT_HEADERS_FINAL=$(echo "$ROOT_HEADERS" | last_header_block)
+    ROOT_STATUS=$(echo "$ROOT_HEADERS_FINAL" | head -1 | tr -d '\r')
+    SERVER_HDR=$(echo "$ROOT_HEADERS_FINAL" | grep -i '^server:' | head -1 | cut -d' ' -f2- | tr -d '\r')
     local SETTINGS_JSON HEALTHZ_JSON WEBHOOK_STATUS
     SETTINGS_JSON=$($CURL "$TARGET/rest/settings" 2>/dev/null)
     HEALTHZ_JSON=$($CURL "$TARGET/healthz" 2>/dev/null)
@@ -737,10 +766,14 @@ with open(os.environ["N8KED_CSV_FILE"], "a", newline="") as f:
     # Security headers
     # -------------------------------------------------------------------
     local HAS_HSTS=false HAS_XFO=false HAS_XCTO=false HAS_CSP=false
-    echo "$ROOT_HEADERS" | grep -qi '^strict-transport-security:' && HAS_HSTS=true
-    echo "$ROOT_HEADERS" | grep -qi '^x-frame-options:' && HAS_XFO=true
-    echo "$ROOT_HEADERS" | grep -qi '^x-content-type-options:' && HAS_XCTO=true
-    echo "$ROOT_HEADERS" | grep -qi '^content-security-policy:' && HAS_CSP=true
+    # These must look only at the FINAL hop's headers (ROOT_HEADERS_FINAL):
+    # scanning the full multi-hop blob (ROOT_HEADERS) would let a header
+    # present only on an intermediate redirect (e.g. a CDN/proxy hop)
+    # register as if the origin itself sent it.
+    echo "$ROOT_HEADERS_FINAL" | grep -qi '^strict-transport-security:' && HAS_HSTS=true
+    echo "$ROOT_HEADERS_FINAL" | grep -qi '^x-frame-options:' && HAS_XFO=true
+    echo "$ROOT_HEADERS_FINAL" | grep -qi '^x-content-type-options:' && HAS_XCTO=true
+    echo "$ROOT_HEADERS_FINAL" | grep -qi '^content-security-policy:' && HAS_CSP=true
     local IS_HTTPS=false
     [[ "$TARGET" == https://* ]] && IS_HTTPS=true
     # If we followed a redirect (e.g. Cloudflare forcing HTTPS) the
@@ -748,7 +781,9 @@ with open(os.environ["N8KED_CSV_FILE"], "a", newline="") as f:
     # $TARGET may still read "http://" — check the headers we actually
     # got back for a Location: https:// hop, or the effective final
     # status line, so the TLS finding doesn't misreport a host that in
-    # fact only serves HTTPS.
+    # fact only serves HTTPS. This deliberately scans every hop
+    # (ROOT_HEADERS, not ROOT_HEADERS_FINAL) since the redirect-to-https
+    # itself is what we're looking for.
     if [[ "$IS_HTTPS" == false ]] && echo "$ROOT_HEADERS" | grep -qi '^location: https://'; then
         IS_HTTPS=true
     fi
@@ -774,7 +809,7 @@ with open(os.environ["N8KED_CSV_FILE"], "a", newline="") as f:
         if echo "$hline" | grep -qiE '^(x-n8n-[a-z-]+|x-powered-by|x-internal-[a-z-]+|x-real-ip|x-forwarded-[a-z-]+|x-runtime|x-served-by|x-backend|x-upstream)[[:space:]]*:'; then
             DISCLOSURE_HDRS+=("$hline")
         fi
-    done < <(echo "$ROOT_HEADERS" | sort -u)
+    done < <(echo "$ROOT_HEADERS_FINAL" | sort -u)
     for h in "${DISCLOSURE_HDRS[@]}"; do
         FINDINGS+=("LOW|header|Response header discloses internal information: $h")
     done
@@ -850,7 +885,18 @@ with open(os.environ["N8KED_CSV_FILE"], "a", newline="") as f:
     local BRUTE_TRIED=0 BRUTE_TOTAL=0
     local BRUTE_VALID=()
     if [[ -n "$USERPASS_FILE" ]]; then
-        BRUTE_TOTAL=$(grep -cE '.:.' "$USERPASS_FILE" 2>/dev/null || echo 0)
+        # Count using the EXACT same trim/skip rules as the loop below
+        # (blank, trimmed-blank, '#'-prefixed, or no ':' are all skipped)
+        # so the reported "tried/total" ratio reflects what was actually
+        # attempted rather than a raw line count that includes comments.
+        BRUTE_TOTAL=$(awk '
+            { gsub(/^[ \t]+|[ \t]+$/, "") }
+            $0 == "" { next }
+            /^#/ { next }
+            index($0, ":") == 0 { next }
+            { n++ }
+            END { print n+0 }
+        ' "$USERPASS_FILE")
         echo "[n8ked] Brute forcing $TARGET/rest/login — $BRUTE_TOTAL pair(s) from $USERPASS_FILE, ${BRUTE_DELAY}s delay..." >&2
         while IFS= read -r pair; do
             pair="$(echo "$pair" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
