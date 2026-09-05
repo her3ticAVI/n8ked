@@ -39,9 +39,6 @@ done
 
 if [[ "$OWNER_OK" != true ]]; then
     log "FATAL: owner setup never succeeded after 10 attempts."
-    log "Last response body was printed above -- if it's HTML, the route"
-    log "is likely wrong for this n8n version; if it's a JSON validation"
-    log "error, the payload shape needs adjusting for this version."
     exit 1
 fi
 log "owner account created"
@@ -70,7 +67,6 @@ if [[ "$WF_STATUS" != "200" ]]; then
     exit 1
 fi
 
-# Validate it's actually JSON before trusting jq with it
 if ! jq -e . "$WF_BODY_FILE" >/dev/null 2>&1; then
     log "FATAL: workflow creation response wasn't valid JSON:"
     log "$(cat "$WF_BODY_FILE" | head -c 500)"
@@ -85,11 +81,20 @@ fi
 log "workflow created: id=$WF_ID"
 
 # --- Activate it (makes the persistent /webhook/ci-test-hook path live) ---
-ACT_STATUS=$(curl -sk -b "$COOKIE_JAR" -X POST "$BASE/rest/workflows/$WF_ID/activate" \
-    -o /dev/null -w '%{http_code}' 2>/dev/null)
+# NOTE: the internal/session-cookie API (/rest/...) has NO dedicated
+# "/activate" route -- that only exists on the Public API (/api/v1/...,
+# API-key auth). On the internal API, activation is a PATCH to the
+# workflow itself with {"active": true} -- the same call the editor UI
+# makes when you flip the Active toggle.
+ACT_BODY_FILE=$(mktemp)
+ACT_STATUS=$(curl -sk -b "$COOKIE_JAR" -X PATCH "$BASE/rest/workflows/$WF_ID" \
+    -H 'Content-Type: application/json' \
+    --data '{"active":true}' \
+    -o "$ACT_BODY_FILE" -w '%{http_code}' 2>/dev/null)
 log "activate workflow: HTTP $ACT_STATUS"
 if [[ "$ACT_STATUS" != "200" ]]; then
     log "FATAL: workflow activation failed (HTTP $ACT_STATUS)"
+    log "response body: $(cat "$ACT_BODY_FILE" | head -c 500)"
     exit 1
 fi
 
